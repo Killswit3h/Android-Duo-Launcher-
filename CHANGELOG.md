@@ -7,6 +7,7 @@ First public-beta preparation release. Tested scope and APK checksums accompany 
 - Add a skippable introduction for fresh installations and help through customization; existing layouts open directly.
 - Improve recovery choices when Google Discover is unavailable.
 - Show distinct Wi-Fi levels across the dot and three arcs.
+- Preserve the current wallpaper when photo selection is canceled or fails, and improve interrupted preview recovery and temporary permission cleanup.
 - Prepare optimized release builds, external signing, public-source export, and automated build checks.
 - Add installation, update, permission, contribution, and compatibility documentation.
 

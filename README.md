@@ -11,6 +11,8 @@ A native Android launcher built around a right-side dock and a home screen that 
 
 Screenshots use sample data on an emulator sized to the reference Fold. [Fresh-install welcome](docs/images/duo-launcher-welcome.png).
 
+**Start here:** [User guide](docs/user-guide.md) · [Troubleshooting](docs/troubleshooting.md) · [Beta release notes](docs/releases/0.15.0-beta01.md)
+
 ## Features
 
 - A persistent right-side dock and vertical Home status indicators.
@@ -80,6 +82,8 @@ Use JDK 17 or Android Studio's bundled JDK, Android SDK 36, and the included Gra
 The debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Release builds use R8 and resource shrinking; private signing material stays outside the repository. Follow [release instructions](docs/public-release.md) for signing and public-source export.
 
 The project uses Kotlin, Jetpack Compose, AndroidX Window, and native widget hosting. Instrumentation runs on disposable emulators. Some integration fixtures require Google, Clock, Chrome, and a configured emulator; they are not commands for your everyday phone.
+
+The [contributor code map](docs/architecture.md) explains the main components, data ownership and gesture/widget constraints.
 
 ## Feedback and contributions
 

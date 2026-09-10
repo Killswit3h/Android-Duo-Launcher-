@@ -29,7 +29,7 @@ export DUO_RELEASE_KEY_PASSWORD='...'
 The public release key is separate from Android's debug key. Because both variants intentionally
 use `com.jake.duolauncher`, Android will not install one as an update to an installation signed by
 the other key. Preserve an existing configured debug installation; test the public release on a
-separate device or profile unless a deliberate migration has been planned.
+separate device or disposable emulator unless a deliberate migration has been planned.
 
 Supplying only some signing values fails configuration. Supplying none leaves ordinary
 `assembleRelease` available as an unsigned build, including in CI. The helper refuses a keystore
@@ -57,6 +57,37 @@ release helpers, CI workflow, public root documents, this guide, and optional PN
 under `docs/images`. Internal working notes, research, device captures, artifacts, local Android SDK
 configuration, and the isolated Discover probe are excluded. The probe remains optional in the
 working tree and does not participate in normal launcher builds.
+
+The [user guide](user-guide.md), [troubleshooting](troubleshooting.md), [contributor code map](architecture.md),
+and [beta notes](releases/0.15.0-beta01.md) are part of the explicit public allowlist.
+
+## GitHub publication
+
+Publish from the reviewed public Git checkout, with the chosen license committed. Confirm the
+repository owner/name and intended visibility before creating the remote. The repository already
+contains a README, license, issue forms, a pull-request template and CI; do not initialize a second
+README or license on GitHub when importing it.
+
+For the first upload, create the repository from that checkout with `gh repo create` using its
+explicit owner/name, visibility, `--source .`, `--remote origin` and `--push` options. This makes the
+committed source visible according to the chosen repository visibility. Wait for the Android CI
+workflow and inspect failures before publishing the beta APK.
+
+Create the version tag on the reviewed release commit and push that tag. Create a prerelease
+with `gh release create`, `--verify-tag`, `--prerelease` and `--notes-file`; `--draft` keeps the
+release unpublished while its attachments and description are checked. Attach only the signed
+release APK, matching public source archive and `SHA256SUMS.txt` from the prepared package.
+Do not attach a personal debug APK, signing configuration or device validation artifacts.
+
+The beta notes use relative links for browsing in the source tree. Before copying them into a
+GitHub Release description, resolve those links to the selected repository's tagged `blob` URLs.
+Check the downloads, notes and checksums once more before publishing the draft. The regular
+Actions workflow builds unsigned artifacts and does not need the private release key.
+
+For later versions, increase Android's `versionCode`, update `versionName` and the release-helper
+version, update the changelog and tested scope, and retain the original signing identity.
+Add each new public release-notes file to `PUBLIC-FILES` and `.gitignore`. Keep prior published
+packages intact so users can identify exactly what they installed.
 
 ## Beta 0.15.0-beta01 validation
 

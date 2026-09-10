@@ -90,7 +90,11 @@ done < "$allowlist"
 mkdir -p "$destination"
 for relative_path in "${public_files[@]}"; do
     mkdir -p "$destination/$(dirname "$relative_path")"
-    cp -p "$repository_root/$relative_path" "$destination/$relative_path"
+    if [[ $(uname -s) == Darwin ]]; then
+        COPYFILE_DISABLE=1 cp -X -p "$repository_root/$relative_path" "$destination/$relative_path"
+    else
+        cp -p "$repository_root/$relative_path" "$destination/$relative_path"
+    fi
 done
 
 "$repository_root/scripts/check-public-source.sh" "$destination"

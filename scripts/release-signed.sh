@@ -51,7 +51,7 @@ apk_name="DuoLauncher-$version-release.apk"
 source_name="DuoLauncher-$version-source"
 cp -p "$apk_source" "$package_dir/$apk_name"
 "$repository_root/scripts/export-public-source.sh" "$staging_dir/$source_name"
-(cd "$staging_dir" && tar -czf "$package_dir/$source_name.tar.gz" "$source_name")
+(cd "$staging_dir" && COPYFILE_DISABLE=1 tar -czf "$package_dir/$source_name.tar.gz" "$source_name")
 
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$package_dir" && sha256sum "$apk_name" "$source_name.tar.gz" > SHA256SUMS.txt)

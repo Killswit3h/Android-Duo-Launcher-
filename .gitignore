@@ -30,3 +30,10 @@ docs/images/*
 *.p12
 *.pem
 *.key
+
+# added by build-pipeline-template installer
+node_modules/
+!.env.example
+build/
+coverage/
+*.log

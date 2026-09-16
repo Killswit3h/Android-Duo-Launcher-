@@ -70,6 +70,24 @@ hosting Today View, App Library and Search; driving Home tiles through the icon 
 schema-9 settings (glass level, icon appearance, badge style, gestures, dock side, grid) into every
 surface; and wiring the private-space gate into library, search, suggestions and Home per FR-77.
 
+## Restore: residual risks raised by the restore-wiring work
+
+- **Stacks can dangle after a legacy import.** A v1/v2 backup carries no stacks, so the user's
+  current ones are kept, but the active layout's widget placements are replaced — a stack can end up
+  referencing a slot that vanished or now holds a different widget. `validate()` checks neither
+  stack→placement nor `leadingPage.today`→slot coherence, so nothing catches it. Left deliberately
+  (a v2 backup must not rewrite what it never described); pruning dangling stacks on legacy import
+  is the real fix.
+- **`LayoutImportPreview`'s defaults are a trap.** `version` defaults to 3 while `layoutSet` and
+  `settings` default to empty, so a hand-built preview claims to carry schema-9 data it does not —
+  which would import an empty launcher. One construction site was fixed; the honest fix is a
+  `carriesSchema9` flag or defaulting `version` to 1.
+- **The SAF round trip is unverified.** Export → restore → undo through the real document picker,
+  and AC-66 end to end, are instrumented-only and have not been run on a device yet.
+- **Two deliberate behaviour changes for the inspector to sign off:** a v1/v2 import onto a
+  non-4×6 grid now reflows instead of corrupting, and an import whose merge fails validation is now
+  refused with a message where it previously applied and surfaced later as a recovery banner.
+
 ## Security hardening deferred with a deliberate decision
 
 - **Tapjacking on the exported pin sheet.** `PinItemActivity` sets no `filterTouchesWhenObscured`, so an app holding `SYSTEM_ALERT_WINDOW` could overlay it and harvest a tap on **Add**. Impact is capped at pinning an item the user did not intend; nothing leaves the device. Deferred only because the pin sheet's UI was being restyled concurrently — worth doing once that settles.

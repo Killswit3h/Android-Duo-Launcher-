@@ -4,15 +4,13 @@ import android.app.Application
 import android.content.ComponentName
 import android.content.pm.LauncherApps
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Path
-import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
 import android.os.Process
 import android.os.UserHandle
 import android.os.UserManager
-import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.AndroidViewModel
+import com.jake.duolauncher.icons.IconRasterizer
+import com.jake.duolauncher.icons.IconStyle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -650,14 +648,21 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
-/** Render adaptive layers through our rounded-square mask, preserving original app artwork. */
-private fun launcherIcon(drawable: Drawable): Bitmap {
-    if (drawable !is AdaptiveIconDrawable) return drawable.toBitmap(144, 144)
-    val bitmap = Bitmap.createBitmap(144, 144, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    canvas.clipPath(Path().apply { addRoundRect(0f, 0f, 144f, 144f, 34f, 34f, Path.Direction.CW) })
-    drawable.setBounds(0, 0, 144, 144)
-    drawable.background?.draw(canvas)
-    drawable.foreground?.draw(canvas)
-    return bitmap
-}
+/**
+ * The catalog thumbnail carried by [AppEntry], rendered through the icon pipeline so adaptive
+ * layers get the real squircle mask and its anti-aliased edge (FR-16) instead of the hard-edged
+ * rounded-rectangle clip this used to apply.
+ *
+ * The size stays a fixed budget on purpose. This bitmap is one shared thumbnail held for *every*
+ * installed app for as long as the catalog lives, so making it density-correct would multiply a
+ * 300-app catalog's footprint by the display density and put NFR-P4's PSS budget at risk. Icons
+ * that are actually drawn go through `icons.DuoIconRenderer`, which renders at the display's real
+ * pixel size (FR-12) and is bounded by its own 64 MB LRU. This thumbnail disappears with
+ * `AppEntry`'s bitmap when B3's icon-key refactor lands.
+ */
+private const val CATALOG_ICON_PX = 144
+
+private val CATALOG_ICON_STYLE = IconStyle()
+
+private fun launcherIcon(drawable: Drawable): Bitmap =
+    IconRasterizer.rasterize(drawable, CATALOG_ICON_PX, CATALOG_ICON_STYLE)

@@ -138,6 +138,17 @@ an app tile, an empty cell, a folder or a widget is consumed by that child and n
 pane. Only genuinely empty background falls through. The empty-cell long-press path
 (`onEmptyWidget`) and the scoped widget long-press pickup are children and keep priority.
 
+**FR-53 is coupled to this, and that is not obvious from the spec.** Double-tap to lock has to
+recognise a double-tap on *the same empty Home background* that FR-45 long-presses. The natural
+implementation is one more callback on the `detectTapGestures` block that already carries `onTap`
+and `onLongPress`, which is a one-line change with no new hit region and no change to gesture
+arbitration. But that block is the 16dp margin strip, so a double-tap would be exactly as hard to
+land as the long-press is today, and the feature would ship technically present and practically
+unusable. Everything else FR-53 needs already exists: `DuoSettings.doubleTapLock`, the settings row,
+`LauncherModel.setGesture`, and an accessibility service that performs global actions. What is
+missing is `GLOBAL_ACTION_LOCK_SCREEN` on `SystemShadeAccessibilityService` and the callback. Do
+both with the fix above, in one change, and verify them together on a device.
+
 **Why it was not applied in this session.** It changes pointer-event arbitration on Home, which is
 the exact regression boundary `docs/architecture.md` and `CONTRIBUTING.md` protect
 (one-page-per-swipe, native widget vertical scroll, scoped long-press pickup). The reasoning above

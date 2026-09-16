@@ -158,9 +158,19 @@ checklist rows 8.1 to 8.12.
 
 ### Not attempted, smaller: B9, B11, B12
 
-Double-tap to lock, widget corner clipping, and the Duo Settings launcher entry. Each is small and
-each is visual or system-integration behaviour whose only real check is a device. They were ranked
-below the hardening items and the session ran out of verified ground before reaching them.
+Widget corner clipping and the Duo Settings launcher entry are small, and each is visual or
+system-integration behaviour whose only real check is a device.
+
+**B9, double-tap to lock, turned out to be coupled to B6**, which is worth knowing before anyone
+picks it up. Most of FR-53 already exists: `DuoSettings.doubleTapLock`, the settings row that
+toggles it, `LauncherModel.setGesture`, and an accessibility service that already performs global
+actions with `eventTypes = 0`. What is missing is `GLOBAL_ACTION_LOCK_SCREEN` on the service and a
+callback on the background gesture detector. The callback is the problem: double-tap has to be
+recognised on the same empty Home background FR-45 long-presses, which today is the 16dp margin
+strip. Adding it alone would ship a feature that is technically present and practically impossible
+to trigger. The service half could have been landed here and deliberately was not, because a
+capability wired to nothing is the failure mode this project has already been bitten by. Do it with
+the B6 fix, in one change, verified together.
 
 ### D20, D21
 

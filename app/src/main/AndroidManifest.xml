@@ -10,11 +10,22 @@
     <!-- Private space container in the App Library (FR-76..FR-78). Android grants this only to the
          default Home app; without the role Duo reports the profile as unsupported and shows nothing. -->
     <uses-permission android:name="android.permission.ACCESS_HIDDEN_PROFILES" />
+    <!-- Next 3 events in the Today View calendar widget (FR-59). Requested at the widget, not at
+         startup; without it the widget shows the date alone. Events are read on demand, never stored. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
     <queries>
         <package android:name="com.google.android.googlequicksearchbox" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Search's web hand-off and Ask control (FR-72, FR-73). Without these, package
+             visibility hides the handlers on API 30+ and both rows silently disappear. -->
+        <intent>
+            <action android:name="android.intent.action.WEB_SEARCH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VOICE_COMMAND" />
         </intent>
     </queries>
     <application android:label="Duo Launcher" android:icon="@drawable/ic_launcher"

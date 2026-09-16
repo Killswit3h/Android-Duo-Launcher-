@@ -37,6 +37,29 @@ Recorded so nobody re-researches them. Sources are in `specs/01-research-brief.m
 - **Schema 9 validates more strictly than schema 8 did in one place:** it rejects a widget overlapping an occupied cell on ordinary pages, where v8 only checked the leading page. It fails safe (nothing is overwritten, the v8 payload stays on disk) but a user hitting it sees an empty Home with "Saved Home layout could not be read". Traced as unreachable through the legacy migration paths and the v8 editor, but this is the one case where the upgrade is stricter, so it needs an on-device upgrade test against a real 0.15.0-beta01 profile before release.
 - **Verify the private-space and lock wiring with tests that fail without it**, since both gaps were invisible to a green build and a passing suite.
 
+## Integration gaps found by actually running the app (2026-09-16, emulator, unfolded 851dp)
+
+Every one of these passed the build and the unit suite. They are wiring gaps, not implementation
+gaps: the components exist, are tested, and are simply not connected to anything.
+
+- **Home tiles do not use the icon pipeline.** Icons render as raw app drawables — square tiles with
+  drop shadows — so no appearance (Default/Dark/Clear/Tinted), no shape mask, no monochrome
+  fallback, no badges. `IconTile.kt` exists; `HomeGrid` is still drawing the old tile.
+- **Nothing hosts the Today View.** The left half of the unfolded screen is empty wallpaper, so the
+  iPhone Duo two-page spread — the single most recognisable thing about this design — does not
+  happen. `TodayView` is fully parameter-driven and needs a host.
+- **The leading page still opens Google Discover** regardless of `LeadingPageKind`, so FR-36's
+  fresh-install default of Today View is not honoured at runtime.
+- **The startup crash proves the coverage gap.** 763 unit tests passed while the launcher could not
+  reach its first frame. Nothing in the suite composes, so nothing in the suite can catch an init
+  order bug, a missing host, or an unwired setting. The instrumented suite and a real launch are
+  the only checks that would have.
+
+**Conclusion for the build plan:** a dedicated integration pass is required before inspection —
+hosting Today View, App Library and Search; driving Home tiles through the icon renderer; wiring the
+schema-9 settings (glass level, icon appearance, badge style, gestures, dock side, grid) into every
+surface; and wiring the private-space gate into library, search, suggestions and Home per FR-77.
+
 ## Security hardening deferred with a deliberate decision
 
 - **Tapjacking on the exported pin sheet.** `PinItemActivity` sets no `filterTouchesWhenObscured`, so an app holding `SYSTEM_ALERT_WINDOW` could overlay it and harvest a tap on **Add**. Impact is capped at pinning an item the user did not intend; nothing leaves the device. Deferred only because the pin sheet's UI was being restyled concurrently — worth doing once that settles.

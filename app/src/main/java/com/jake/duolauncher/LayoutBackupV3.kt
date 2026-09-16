@@ -475,8 +475,11 @@ internal fun decodeLayoutBackupV3(
         expanded = preset("expanded"),
     )
     // The same invariants an on-disk schema-9 payload must satisfy. A backup that fails here
-    // describes a layout the launcher would refuse to save, so it is refused as a value.
-    validate(persisted)
+    // describes a layout the launcher would refuse to save, so it is refused as a value. Stacks are
+    // pruned first, for the same reason the decoder prunes: a backup written by an older build can
+    // carry a stack whose widget has since gone, and repairing that is better than refusing it.
+    val coherent = persisted.withCoherentStacks()
+    validate(coherent)
 
     val placedApps = LayoutTarget.entries.flatMap { target ->
         val layout = set.layout(target)

@@ -1,9 +1,10 @@
 # Inspection report — 1.0.0-beta01 attempt
 
-**Status: BLOCKED. Not an inspection PASS, and not a FAIL of the code either.**
-The build toolchain could not be installed in this session, so no acceptance criterion could be
-executed. This report records the blocker precisely enough to be reproduced or ruled out, states
-what is and is not known about the branch, and leaves the FR sweep to a session that can build.
+**Status: INCOMPLETE. Not an inspection PASS.**
+
+A subset of the work was completed and verified through CI. The rest could not be attempted to a
+standard worth committing, because this session had no Android toolchain and no device. This report
+says exactly which is which, and does not claim a sweep that did not happen.
 
 Date: 2026-09-16
 Branch: `claude/duo-launcher-final-push-eiv90p`, cut from `main` at `aedb6d2`
@@ -13,17 +14,7 @@ Package: `com.jake.duolauncher`, versionName 1.0.0-beta01, versionCode 31
 
 ## Environment
 
-### What is present
-
-| Component | State |
-|---|---|
-| JDK 17 | Installed (`openjdk 17.0.20`, at `/usr/lib/jvm/java-17-openjdk-amd64`) |
-| Gradle 8.14.3 | Downloaded by the wrapper from `services.gradle.org`, works |
-| Kotlin compiler 2.1.20 | Installed standalone from the JetBrains GitHub release, usable only as a parser |
-| Android SDK | **Absent** |
-| Hardware virtualization | **Absent** (`/dev/kvm` does not exist) |
-
-### What blocks the build
+### The blocker
 
 `dl.google.com` is denied by this session's egress policy. That one host serves both things this
 project cannot build without:
@@ -31,8 +22,8 @@ project cannot build without:
 - **Google Maven** (`https://dl.google.com/dl/android/maven2/`, for which `maven.google.com` is an
   alias that redirects to it). Every AndroidX artifact, the Compose BOM, and the Android Gradle
   Plugin come from there and from nowhere else.
-- **The Android SDK repository** (`https://dl.google.com/android/repository/`), which serves the
-  command line tools, platform 36, build-tools 36.0.0 and platform-tools.
+- **The Android SDK repository** (`https://dl.google.com/android/repository/`): command line tools,
+  platform 36, build-tools 36.0.0, platform-tools.
 
 Reproduction:
 
@@ -44,148 +35,173 @@ $ ./scripts/gradle.sh --no-daemon :app:assembleDebug
 FAILURE: Build failed with an exception.
 * What went wrong:
 Plugin [id: 'com.android.application', version: '8.11.0', apply: false] was not found in any of the
-following sources:
-- Gradle Core Plugins ... - Plugin Repositories (could not resolve plugin artifact
+following sources: ... (could not resolve plugin artifact
   'com.android.application:com.android.application.gradle.plugin:8.11.0')
 ```
 
-Hosts confirmed reachable: `repo1.maven.org`, `services.gradle.org`, `developer.android.com`,
-`github.com`. Hosts confirmed blocked: `dl.google.com`, `maven.google.com`, and the community
-mirrors (`maven.aliyun.com`, `mirrors.cloud.tencent.com`, `repo.huaweicloud.com`,
-`mirrors.tuna.tsinghua.edu.cn`, `jitpack.io`). Maven Central does not carry AndroidX or AGP:
-`repo1.maven.org/maven2/androidx/window/window/1.5.1/window-1.5.1.pom` returns 404, and so does the
-same path on the Gradle Plugin Portal.
+Reachable: `repo1.maven.org`, `services.gradle.org`, `developer.android.com`, `github.com`.
+Blocked: `dl.google.com`, `maven.google.com`, and the community mirrors (`maven.aliyun.com`,
+`mirrors.cloud.tencent.com`, `repo.huaweicloud.com`, `mirrors.tuna.tsinghua.edu.cn`, `jitpack.io`).
+Maven Central and the Gradle Plugin Portal do not carry AndroidX or AGP: both return 404 for
+`androidx/window/window/1.5.1/window-1.5.1.pom`. Working around an egress policy denial is out of
+bounds, so no mirror or proxy bypass was attempted.
 
-Working around an egress policy denial is explicitly out of bounds, so no mirror, proxy bypass or
-vendored-artifact scheme was attempted.
+There is also no `/dev/kvm`, so no emulator could be created even with an SDK.
 
-### What that costs
+### What made progress possible anyway
 
-Every one of these is unavailable, not merely unrun:
+**CI is a real gate.** `.github/workflows/ci.yml` runs on a GitHub runner with full network access
+and executes `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleRelease` against
+the public-source export. That is the whole local gate plus R8, at roughly eight minutes per
+iteration. Every code change on this branch was landed behind it.
 
-- `:app:assembleDebug`, `:app:testDebugUnitTest`, `:app:lintDebug`, `:app:assembleRelease`
-- the 894-test unit suite, so the "never drops below 894" guarantee could not be checked
-- the instrumented suite (`:app:connectedDebugAndroidTest`) and any Gradle Managed Device: no SDK,
-  and separately no KVM, so an emulator could not be created even with an SDK
+Locally, two weaker gates were used before spending a CI cycle: a standalone Kotlin 2.1.20 compiler
+from the JetBrains GitHub release, used as a **parser only** (no Android or Compose classpath, so it
+resolves no framework symbol and catches nothing but syntax), and `scripts/export-public-source.sh`
+followed by `scripts/check-public-source.sh`, which are shell and need no toolchain.
+
+### What remains impossible here
+
+- Running the app at all: no APK, no install, no Home role, no screenshots, no `adb logcat -b crash`
+- The instrumented suite and any Gradle Managed Device
 - Baseline Profile generation, macrobenchmarks, `dumpsys gfxinfo`, `dumpsys meminfo`, StrictMode
-- installing the APK, setting Duo as Home, screenshots, `adb logcat -b crash`
-- the public-source export check's build step (`scripts/check-public-source.sh` itself is shell and
-  could run, but the CI gate it feeds builds the export)
+- Anything about a foldable: fold continuity, half-open hinge avoidance, 120Hz
 
-### To unblock
+### To lift it
 
 Allow `dl.google.com` and `maven.google.com` for this environment. Emulator work needs `/dev/kvm`
-in addition. With those, the full brief is executable as written.
+in addition.
 
 ---
 
-## What this session did and did not change
+## What was completed and verified
 
-### Changed
+Four commits, each green in CI (build, unit tests, lint, and the R8 release build).
 
-| Change | Risk | Verified how |
+| Item | Change | Evidence |
 |---|---|---|
-| `specs/device-test-checklist.md` added (item D22) | None, documentation | Read-through only |
-| `specs/backlog.md`: FR-45 Edit mode root cause recorded | None, documentation | Static source reading, see below |
-| `README.md`: two stale "Known limits" bullets corrected | Low, documentation | Static: the features they deny are present in source |
-| `specs/04-inspection-report.md` (this file) | None, documentation | n/a |
+| C14, FR-49 | Cold-start hole in the pin flow closed | `d37d78d`, CI run 20 green |
+| C15, NFR-S6 | Tapjacking on the exported pin sheet | `d37d78d`, CI run 20 green |
+| C16, FR-29 | Uninstall hand-off requires a system handler | `d37d78d`, CI run 20 green |
+| C17, FR-57/61-64 | Dangling stacks pruned, `validate()` asserts coherence | `48ecbbe` |
+| C18, FR-82 | `LayoutImportPreview.version` default made honest | `48ecbbe` |
+| C19, NFR-P5 | Three TIME_TICK receivers consolidated | `14f2adf` |
+| D22 | `specs/device-test-checklist.md` written | `6078a52`, `14f2adf` |
+| Docs | README "Known limits" corrected | `6078a52` |
 
-The README correction is the one factual claim here, so it is worth stating the evidence.
-`icons/IconPackRepository.kt`, `icons/AppFilter.kt` and `icons/IconRenderer.kt` implement icon packs,
-and `settings/SettingsLookSections.kt` exposes them. `badges/` implements notification dots
-(`BadgeRepository.kt`, `DuoNotificationListener.kt`, `BadgeAccess.kt`) and `home/IconTile.kt`
-consumes them. `profiles/PrivateSpaceRepository.kt` provides `PrivateSpaceGate`, and
-`home/HostServices.kt` plus `library/LibraryHosting.kt` consume it. The README said all three were
-unimplemented or unsupported. That is stale. Whether each one *behaves* correctly is a device
-question and is on the checklist (rows 5.3, 6.10, 9.x).
+27 unit tests were added across `LauncherStateSnapshotTest`, `HomeLayoutLockTest`,
+`UninstallRulesTest` and the new `WidgetStackCoherenceTest`. The suite baseline of 894 was never run
+locally, so the claim here is narrower and true: CI's `:app:testDebugUnitTest` passed on every
+commit, and no existing test was deleted or modified.
 
-### Deliberately not changed
+### Three of these deserve a note
 
-No production Kotlin was written. That is a judgement call, and the reasoning is the point of this
-section.
+**C14** distinguishes three states rather than two, which is the whole fix. Nothing saved reads as
+unlocked (the user never set the lock). A pre-schema-9 payload reads as unlocked (`lockLayout`
+arrived with schema 9, so the setting genuinely did not exist). A payload that exists but cannot be
+parsed reads as **locked**, because that is the "the setting exists and I could not read it" case,
+and failing open there was the hole. The live model seam always wins when it exists.
 
-The brief's own hard rule is "verify at runtime, not just with unit tests", and its cautionary tale
-is this repo's history: 763 green unit tests coexisted with a launcher that crashed on its first
-frame, because nothing in the JVM suite composes. In this session there is no unit suite either, and
-no compiler that can resolve an Android or Compose symbol. Anything written here would have been
-checked by nothing stronger than a Kotlin parser, which catches unbalanced braces and nothing else.
-No type error, no unresolved reference, no Compose misuse, no lint violation, no init-order bug.
+**C17 turned out to be larger than the backlog recorded.** The backlog described dangling stacks as
+a legacy-import problem. Reading `LauncherModel` showed `removePlacement` drops a widget placement
+and never tells the stack holding it, so the same incoherence arises with no restore involved. That
+changed the design: adding the `validate()` rule the brief asked for, on its own, would have
+rejected states already on disk from shipped builds and turned an ordinary upgrade into "Saved Home
+layout could not be read" and an empty Home. So the pruning runs first at every point a document is
+decoded or merged, and `validate()` asserts the invariant only once pruning has established it.
+Repairing beats refusing.
 
-Landing items A7 (widget stacks UI), A8 (folder redesign), A10 (predictive back across six surfaces)
-and A13 (strings and accessibility pass) in that state would have handed over several thousand lines
-of Compose that almost certainly does not compile, on a branch whose value is that it currently
-builds and carries 894 green tests. The likely outcome is a longer debugging job than writing them
-fresh.
-
-The gesture items are worse than that. Item B6's fix moves pointer-event handling on Home, which is
-the exact regression boundary `docs/architecture.md` and `CONTRIBUTING.md` protect: one page per
-swipe across pager, dock and rail, native widget vertical scrolling, and scoped long-press pickup.
-That boundary has been broken before by plausible-looking fixes. It is confirmable only by the
-instrumented suite and a real device, neither of which exists here.
-
-So the work that was possible without a toolchain was done, and the work that needs one was analysed
-and recorded rather than guessed at.
+**C19 is verified to compile, not to work.** Whether the clocks still tick every minute is runtime
+behaviour that nothing in the JVM suite can observe. Section 8b of the device checklist exists for
+exactly that, and it covers the pin sheet, uninstall and stack changes for the same reason.
 
 ---
 
-## Findings that did not need a build
+## What was not done
 
-### FR-45, item B6: Edit mode does not open below the app grid. Root cause confirmed by reading.
+### Deliberately not attempted: A1-A5, B7, B8, B10, B13
 
-`home/HomePager.kt`, `HomePagePane`. The background long-press verb exists and is correct:
+The performance track (benchmark build type, Baseline Profiles, macrobenchmarks, blur audit, memory)
+and the large UI features (widget stacks UI, folder redesign, predictive back, the accessibility and
+strings pass).
 
-```kotlin
-val backgroundLongPress = { if (!drag.active) onEditMode?.invoke() ?: onEmptyWidget(backgroundTarget) }
-```
+The performance track is not a coding problem here, it is a measurement problem. A benchmark build
+type and a `:baselineprofile` module can be written blind, but their entire purpose is to produce
+numbers, and no number can be produced without a device. Committing the scaffolding while reporting
+no measurement would add two Gradle modules to the build for nothing.
 
-It is attached to exactly one pointer-input region, a **16dp-wide strip down the left edge of the
-pane**:
+The UI features are several thousand lines of Compose whose only available check would have been a
+syntax parser. This repo's own history is the argument: 763 green unit tests coexisted with a
+launcher that crashed on its first frame, because nothing in the JVM suite composes. CI would have
+caught compilation, but not layout, not gesture arbitration, not whether anything renders.
 
-```kotlin
-Box(Modifier.width(16.dp).fillMaxHeight().testTag("home-options-margin-$page")
-    .pointerInput(...) { detectTapGestures(onLongPress = { backgroundLongPress() }, ...) })
-```
+### Root-caused but not fixed: B6, FR-45
 
-Everything to the right of that strip is the `Column` holding `SharedHomeGrid`, and that `Column` is
-`fillMaxHeight().verticalScroll(...)`. It therefore covers the entire pane height, including the
-empty region below the last grid row, and it has no long-press handler. A press on empty wallpaper
-below the grid lands on the scrolling `Column` and is dropped.
+Edit mode does not open on empty wallpaper below the app grid. The cause is confirmed by reading and
+recorded in full in `specs/backlog.md`.
 
-There is a second, smaller dead band. `HomePagePane`'s `Box` is
-`.height((contentHeight - bottomSpace).coerceAtLeast(0.dp))` while its parent in `ExpandedWorkspace`
-is `fillMaxHeight()`, so the `bottomSpace` strip (44dp on default Home, 88dp otherwise) sits below
-the pane with no handler on either display.
+In `home/HomePager.kt`, `HomePagePane` defines the background long-press correctly but attaches it
+to exactly one pointer-input region: a 16dp-wide strip down the left edge of the pane. Everything to
+its right is the `Column` holding `SharedHomeGrid`, which is `fillMaxHeight().verticalScroll(...)`
+and therefore covers the whole pane height including the empty area below the last grid row, with no
+long-press handler. A press on empty wallpaper below the grid lands on that scrolling `Column` and is
+dropped. A second dead band is the `bottomSpace` strip (44dp or 88dp) below the pane, which has no
+handler on either display. This explains why the unfolded screen is where it shows: that is where
+there is most empty space below the grid.
 
-This explains the reported symptom exactly, including why the unfolded screen is where it shows:
-that is where there is the most empty space below the grid.
+The fix is small, and it is deliberately not applied. It moves pointer-event handling on Home, which
+is the exact regression boundary `docs/architecture.md` and `CONTRIBUTING.md` protect: one page per
+swipe across pager, dock and rail, native widget vertical scrolling, and scoped long-press pickup.
+The argument for why it should be safe rests on Compose pass ordering and event consumption, which
+CI cannot check and no unit test in this repo exercises. It needs the instrumented gesture suite and
+checklist rows 8.1 to 8.12.
 
-The proposed fix, the argument for why it should be safe, and the reason it was not applied unbuilt
-are in `specs/backlog.md`. It is a small change. It is not a change to make blind.
+### Not attempted, smaller: B9, B11, B12
 
-### The pre-existing gap list still stands
+Double-tap to lock, widget corner clipping, and the Duo Settings launcher entry. Each is small and
+each is visual or system-integration behaviour whose only real check is a device. They were ranked
+below the hardening items and the session ran out of verified ground before reaching them.
 
-`specs/backlog.md` already carries the items this brief restates as C14 to C19 (the FR-49 cold-start
-hole in `PinItemActivity`, tapjacking on the exported pin sheet, the implicit `ACTION_DELETE`
-hand-off, dangling stacks after a legacy import, `LayoutImportPreview`'s dishonest `version` default,
-and the three unconsolidated TIME_TICK receivers). Nothing in this session contradicts any of them,
-and none could be fixed to a standard worth committing.
+### D20, D21
+
+The instrumented suite and screenshot verification. Impossible without an SDK, and separately
+without KVM.
 
 ---
 
 ## Acceptance criteria
 
-Every criterion AC-1 through AC-68, covering FR-1 through FR-85, is **UNVERIFIED-NEEDS-TOOLCHAIN**.
+Every criterion AC-1 through AC-68, covering FR-1 through FR-85, is **UNVERIFIED-NEEDS-DEVICE** with
+respect to behaviour.
 
-Marking them individually would imply a sweep that did not happen. The honest statement is the
-categorical one: nothing was executed, so nothing was verified. The last evidence on record for this
-tree is the state described in `specs/backlog.md`, which was produced by a session that could build
-and run the app, and which already lists the integration gaps found by doing so.
+Marking them individually would imply a sweep that did not happen. What can be said precisely:
 
-For the criteria that no build could settle anyway, `specs/device-test-checklist.md` is the
-instrument: 10 sections covering refresh rate and blur cost, fold and unfold continuity, half-open
-hinge avoidance, the schema 9 upgrade over a real 0.15.0-beta01 layout, One UI restricted-settings
-grants, third-party Home behavior, on-device performance numbers, the gesture regression boundary,
-accessibility at font scale 1.3, and sign-off.
+- The rules added on this branch are verified as **rules**: `PinRequestGate` composed with the new
+  persisted lock, `UninstallAction.isTrustedHandler`, and `stackCoherence` are pure functions with
+  unit tests that fail without them, green in CI.
+- Nothing on this branch is verified as **behaviour**. No frame was rendered.
+- The last behavioural evidence on record for this tree is in `specs/backlog.md`, from a session
+  that could build and run the app, and which already lists the integration gaps found by doing so.
+
+`specs/device-test-checklist.md` is the instrument for the rest: 11 sections covering refresh rate
+and blur cost, fold and unfold continuity, half-open hinge avoidance, the schema 9 upgrade over a
+real 0.15.0-beta01 layout, One UI restricted-settings grants, third-party Home behaviour, on-device
+performance numbers, the gesture regression boundary, this branch's own changes (8b), accessibility
+at font scale 1.3, and sign-off.
+
+---
+
+## Performance
+
+**No numbers were measured.** No optimized build type exists yet, and nothing could be built or run.
+
+The targets stand unmeasured: NFR-P1 janky frames ≤ 5%, NFR-P2 cold start ≤ 900 ms, NFR-P3 search
+≤ 100 ms per keystroke, NFR-P4 PSS ≤ 350 MB and icon LRU ≤ 64 MB, NFR-P5 no main-thread disk I/O,
+NFR-P6 one shared blur layer. Section 7 of the device checklist is where they get filled in.
+
+One observation that needed no measurement: the debug APK being 61 MB is expected, since the debug
+build type is neither minified nor resource-shrunk. That is what work item A1 exists to fix, and it
+remains undone.
 
 ---
 
@@ -194,8 +210,9 @@ accessibility at font scale 1.3, and sign-off.
 Do not release, and do not treat this branch as inspected.
 
 1. Allow `dl.google.com` and `maven.google.com`, and provide `/dev/kvm` if emulator work is wanted.
-2. Re-run the baseline `./scripts/gradle.sh :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`
-   and confirm 894 tests, 0 failures, before changing anything.
-3. Work items A1 through C19 from the brief in order, each behind that gate.
-4. Run `specs/device-test-checklist.md` on the Fold 8.
+2. Re-run `./scripts/gradle.sh :app:assembleDebug :app:testDebugUnitTest :app:lintDebug` and confirm
+   the suite count before changing anything further.
+3. Take the remaining items in the brief's order: A1-A5, then B6-B13, then D20-D21.
+4. Run `specs/device-test-checklist.md` on the Fold 8, section 4 first, since that one is data loss
+   on upgrade.
 5. Redo this report with a real FR sweep.

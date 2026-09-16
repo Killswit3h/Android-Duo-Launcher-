@@ -103,8 +103,6 @@ data class LauncherState(
 class LauncherModel(application: Application) : AndroidViewModel(application) {
     private data class RefreshedApps(val entries: List<AppEntry>, val profiles: List<AppProfile>,
         val authoritativeProfiles: Set<Long>, val removedProfiles: Set<Long>)
-    private data class UndoImportSettings(val compact: LayoutPreset, val expanded: LayoutPreset, val labels: Boolean,
-        val googleSearch: Boolean, val verticalStatus: Boolean)
     private val prefs = application.getSharedPreferences("launcher", 0)
     private val launcherApps = application.getSystemService(LauncherApps::class.java)
     private val userManager = application.getSystemService(UserManager::class.java)
@@ -129,8 +127,14 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         scheduler = CoroutinePersistenceScheduler(viewModelScope, Dispatchers.IO),
         serialize = ::serializeState, write = ::writeState)
     private var persistRequested = false
+    /**
+     * The complete state before the last undoable edit, and the state it produced.
+     *
+     * Both halves are whole [LauncherState] values, which is what makes undo total: restoring
+     * `first` brings back the layouts, the grid, the dock, and every schema-9 field an import may
+     * have replaced, not merely the placements that were dragged.
+     */
     private var undoLayout: Pair<LauncherState, LauncherState>? = null
-    private var undoImportSettings: UndoImportSettings? = null
     private var refreshing = false
     private var refreshPending = false
     private val invalidatedPackages = mutableSetOf<Pair<Long, String>>()
@@ -507,16 +511,25 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         return commitLayout(old.layout.copy(folders = old.folders.map { if (it.id == folderId) transform(it) else it }))
     }
 
+    /**
+     * Applies a reviewed backup (FR-82, AC-66).
+     *
+     * Everything the backup carries is merged into **one** [LauncherState], validated, and then
+     * assigned once. One commit means one persisted write, one undo snapshot, and no window in
+     * which half a backup is on screen. [importedLauncherState] validates the merge before this
+     * method can reach the assignment, so a backup that would describe an unsavable layout leaves
+     * `mutable` untouched and the current layout standing.
+     *
+     * A rejection is *thrown* rather than returned false, because `false` already means the far
+     * more ordinary "this layout is already active". The caller treats a bad backup as a value and
+     * wraps this in `runCatching`, exactly as it does the decoder.
+     */
     fun applyImportedLayout(preview: LayoutImportPreview): Boolean {
         if (statePayloadInvalid) return false
         val old = mutable.value
-        if (old.layout == preview.layout && old.compact == preview.compact && old.expanded == preview.expanded &&
-            old.labels == preview.labels && old.googleSearch == preview.googleSearch && old.verticalStatus == preview.verticalStatus) return false
-        undoImportSettings = UndoImportSettings(old.compact, old.expanded, old.labels, old.googleSearch, old.verticalStatus)
-        val next = old.withActiveLayout(preview.layout).copy(
-            compact = preview.compact, expanded = preview.expanded,
-            labels = preview.labels, googleSearch = preview.googleSearch, verticalStatus = preview.verticalStatus,
-            editRevision = old.editRevision + 1, canUndoEdit = true)
+        val imported = importedLauncherState(old, preview)
+        if (imported == old) return false
+        val next = imported.copy(editRevision = old.editRevision + 1, canUndoEdit = true)
         undoLayout = old to next
         mutable.value = next
         persist()
@@ -562,39 +575,24 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         if (old.layout == next) return false
         val updated = old.withActiveLayout(next).copy(editRevision = old.editRevision + 1, canUndoEdit = true)
         undoLayout = old to updated
-        undoImportSettings = null
         mutable.value = updated
         persist()
         return true
     }
 
     /**
-     * Undo restores the whole previous state, which is what makes a grid change undoable (FR-33):
-     * the grid, every layout and every displaced item come back together.
+     * Undo restores the whole previous state, which is what makes a grid change undoable (FR-33)
+     * and what makes an import undoable in full (AC-66): the grid, all three layouts, the dock,
+     * every displaced item and every schema-9 setting come back together, because the snapshot is
+     * the entire [LauncherState] rather than a list of the fields the edit happened to touch.
      */
     fun undoEdit(): Boolean {
         val (before, after) = undoLayout ?: return false
         val old = mutable.value
         if (!old.canUndoEdit || old.layout != after.layout || old.layoutSet != after.layoutSet) return false
         val installed = (old.apps.map { it.id } + before.folders.map { it.id }).toSet()
-        val settings = undoImportSettings
-        val restored = before.layout.let { layout ->
-            layout.copy(
-                slots = reconcileHomeSlots(layout.slots, installed),
-                leadingSlots = layout.leadingSlots.map { it?.takeIf(installed::contains) },
-                dock = layout.dock.map { it?.takeIf(installed::contains) },
-            )
-        }
-        mutable.value = before.withActiveLayout(restored).copy(
-            apps = old.apps, profiles = old.profiles, loading = old.loading, error = old.error,
-            compact = settings?.compact ?: before.compact,
-            expanded = settings?.expanded ?: before.expanded, labels = settings?.labels ?: before.labels,
-            googleSearch = settings?.googleSearch ?: before.googleSearch,
-            verticalStatus = settings?.verticalStatus ?: before.verticalStatus,
-            canUndoEdit = false,
-            editRevision = old.editRevision + 1)
+        mutable.value = undoneLauncherState(before, old, installed)
         undoLayout = null
-        undoImportSettings = null
         persist()
         return true
     }
@@ -608,7 +606,7 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
 
     private inline fun updateSimple(transform: (LauncherState) -> LauncherState) {
         if (statePayloadInvalid) return
-        undoLayout = null; undoImportSettings = null
+        undoLayout = null
         mutable.update { transform(it).copy(canUndoEdit = false) }
         persist()
     }
@@ -647,7 +645,6 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         val next = old.withLayoutSet(old.layoutSet.withLayout(target, outcome.layout))
             .copy(editRevision = old.editRevision + 1, canUndoEdit = true)
         undoLayout = old to next
-        undoImportSettings = null
         mutable.value = next
         persist()
         return outcome
@@ -930,7 +927,6 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         }
         mutable.value = old.withActiveLayout(next).copy(canUndoEdit = false, editRevision = old.editRevision + 1)
         undoLayout = null
-        undoImportSettings = null
         persist()
     }
 
@@ -944,7 +940,6 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
             dock = layout.dock.map { id -> id?.takeIf { it in installed || isFolderId(it) } })
         mutable.value = old.withActiveLayout(restored).copy(canUndoEdit = false, editRevision = old.editRevision + 1)
         undoLayout = null
-        undoImportSettings = null
         persist()
     }
 
@@ -958,24 +953,7 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     /** Writes a pending edit synchronously, for paths where the process may be killed next. */
     internal fun flushPersistence() = persistence.flush()
 
-    private fun serializeState(): String {
-        val s = mutable.value
-        return encodeLauncherState(
-            LauncherPersistedState(
-                layoutSet = s.layoutSet,
-                leadingPage = s.leadingPage,
-                stacks = s.stacks,
-                hiddenApps = s.hiddenApps,
-                iconOverrides = s.iconOverrides,
-                settings = s.settings,
-                labels = s.labels,
-                googleSearch = s.googleSearch,
-                verticalStatus = s.verticalStatus,
-                compact = s.compact,
-                expanded = s.expanded,
-            ),
-        )
-    }
+    private fun serializeState(): String = encodeLauncherState(mutable.value.persistedState())
 
     /**
      * Writes the layout, taking every backup that is due first.
@@ -1083,6 +1061,156 @@ internal fun LauncherState.withLayoutSet(set: LayoutSet): LauncherState {
 /** Writes an edited [HomeLayout] back into whichever layout is active. */
 internal fun LauncherState.withActiveLayout(layout: HomeLayout): LauncherState =
     withLayoutSet(layoutSet.withHomeLayout(activeTarget, layout))
+
+/**
+ * The persisted record behind a live state: what is written to disk, and what [validate] checks.
+ *
+ * Keeping this in one place is what lets a *candidate* state be validated with exactly the rules
+ * the on-disk payload must satisfy, before it is ever committed.
+ */
+internal fun LauncherState.persistedState(): LauncherPersistedState = LauncherPersistedState(
+    layoutSet = layoutSet,
+    leadingPage = leadingPage,
+    stacks = stacks,
+    hiddenApps = hiddenApps,
+    iconOverrides = iconOverrides,
+    settings = settings,
+    labels = labels,
+    googleSearch = googleSearch,
+    verticalStatus = verticalStatus,
+    compact = compact,
+    expanded = expanded,
+)
+
+/**
+ * Merges a reviewed backup into [old], producing the single state the model commits (FR-82, AC-66).
+ *
+ * ## Which fields a backup is allowed to write
+ *
+ * **Only the ones it actually carries.** Version 3 is the format that added the three layouts, the
+ * grids, dock side and capacity, the leading page, stacks, hidden apps, icon overrides and the whole
+ * settings block, so a v3 document applies all of them. A v1/v2 document describes a single 4×6
+ * arrangement and nothing else, and [LayoutImportPreview] fills the rest with *defaults* — so
+ * applying those fields would quietly reset the user's glass level, accent, gestures, grids and dock
+ * to factory values as a side effect of restoring an old layout. The rule is therefore keyed on the
+ * declared version rather than on comparing values: a default is indistinguishable from a user who
+ * deliberately chose the default, so only the version can say whether a field was ever described.
+ *
+ * ## Fitting a legacy layout
+ *
+ * A v1/v2 layout is always 4×6, and the user's current layout may not be. It is reflowed onto the
+ * grid they are on, which keeps the grid a *setting the backup did not carry* while guaranteeing the
+ * result is coherent — a 4×6 leading page spliced into a 6×6 layout is exactly the kind of state
+ * [validate] refuses. The reflow is the identity when the grids already match, which is the ordinary
+ * case, so an upgrade-era backup restores byte for byte the way it always did.
+ *
+ * Throws if the merge would not validate, before any of it can be committed.
+ */
+internal fun importedLauncherState(old: LauncherState, preview: LayoutImportPreview): LauncherState {
+    val carriesSchema9Fields = preview.version >= LAYOUT_BACKUP_VERSION
+    val merged = if (carriesSchema9Fields) {
+        old.withLayoutSet(preview.layoutSet).copy(
+            leadingPage = preview.leadingPage,
+            stacks = preview.stacks,
+            hiddenApps = preview.hiddenApps,
+            iconOverrides = preview.iconOverrides,
+            settings = preview.settings,
+        )
+    } else {
+        old.withLayoutSet(legacyImportedLayoutSet(old, preview.layout))
+    }
+    val imported = merged.copy(
+        compact = preview.compact,
+        expanded = preview.expanded,
+        labels = preview.labels,
+        googleSearch = preview.googleSearch,
+        verticalStatus = preview.verticalStatus,
+    )
+    // The same invariants the on-disk payload must satisfy. This runs before the caller's single
+    // assignment, so a refusal leaves the live state exactly as it was.
+    validate(imported.persistedState())
+    return imported
+}
+
+/** Writes a v1/v2 arrangement into the active layout, leaving every schema-9 field alone. */
+private fun legacyImportedLayoutSet(old: LauncherState, imported: HomeLayout): LayoutSet {
+    val target = old.activeTarget
+    val existing = old.layoutSet.layout(target)
+    val replaced = existing.copy(
+        grid = imported.grid,
+        slots = imported.slots,
+        leadingSlots = imported.leadingSlots,
+        widgetPlacements = imported.widgetPlacements,
+        widgetRestores = imported.widgetRestores,
+    )
+    val fitted = reflowLayout(replaced, existing.grid).layout.withPageIds()
+    return old.layoutSet.withLayout(target, fitted)
+        .copy(
+            // The dock is shared, so an imported four-slot dock is fitted to the capacity the user
+            // is on rather than left disagreeing with it.
+            dock = old.layoutSet.dock.copy(items = imported.dock).sanitized(),
+            folders = imported.folders,
+        )
+        .withoutDanglingReferences(target)
+}
+
+/**
+ * Clears references the *other* layouts can no longer resolve.
+ *
+ * An imported folder table replaces the shared one, so a layout that is not the import's target can
+ * be left naming a folder that no longer exists, or placing an app that is now inside an imported
+ * folder. Both are states [validate] refuses, and neither is the user's doing, so the stale cell is
+ * emptied rather than the whole restore being rejected.
+ */
+private fun LayoutSet.withoutDanglingReferences(active: LayoutTarget): LayoutSet {
+    val folderIds = folders.mapTo(mutableSetOf(), FolderEntry::id)
+    val children = folders.flatMapTo(mutableSetOf(), FolderEntry::appIds)
+    fun keep(id: String?): String? = when {
+        id == null -> null
+        isReservedFolderId(id) -> id.takeIf { it in folderIds }
+        else -> id.takeUnless { it in children }
+    }
+    var result = this
+    LayoutTarget.entries.filterNot { it == active }.forEach { target ->
+        val layout = layout(target)
+        result = result.withLayout(
+            target,
+            layout.copy(
+                slots = layout.slots.map(::keep).dropLastWhile { it == null },
+                leadingSlots = layout.leadingSlots.map(::keep),
+            ),
+        )
+    }
+    return result
+}
+
+/**
+ * The state an undo returns to: [before] in full, carrying only the live catalogue forward.
+ *
+ * [installed] is passed in rather than read from [current] so this stays a pure function the JVM
+ * suite can exercise; the model supplies the installed apps plus the snapshot's own folder ids.
+ */
+internal fun undoneLauncherState(
+    before: LauncherState,
+    current: LauncherState,
+    installed: Set<String>,
+): LauncherState {
+    val restored = before.layout.let { layout ->
+        layout.copy(
+            slots = reconcileHomeSlots(layout.slots, installed),
+            leadingSlots = layout.leadingSlots.map { it?.takeIf(installed::contains) },
+            dock = layout.dock.map { it?.takeIf(installed::contains) },
+        )
+    }
+    return before.withActiveLayout(restored).copy(
+        apps = current.apps,
+        profiles = current.profiles,
+        loading = current.loading,
+        error = current.error,
+        canUndoEdit = false,
+        editRevision = current.editRevision + 1,
+    )
+}
 
 internal fun LauncherPersistedState.toLauncherState(banner: String?): LauncherState =
     LauncherState(

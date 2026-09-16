@@ -101,10 +101,16 @@ class BackupController(
             } }
             result.rethrowCancellation()
             if (token != generation || operation != OP_PREVIEW) return@launch
-            result.onSuccess {
-                val changed = model.applyImportedLayout(it)
-                successMessage = if (changed) "Layout restored. Widgets are ready to reconnect." else "This layout is already active."
-                clearTransaction(clearMessages = false)
+            result.onSuccess { preview ->
+                // Applying validates the merged state and refuses anything that would not save, so
+                // a rejection lands on the same failure path a malformed payload takes: an error
+                // message, and a layout that was never touched.
+                val applied = runCatching { model.applyImportedLayout(preview) }
+                applied.rethrowCancellation()
+                applied.onSuccess { changed ->
+                    successMessage = if (changed) "Layout restored. Widgets are ready to reconnect." else "This layout is already active."
+                    clearTransaction(clearMessages = false)
+                }.onFailure { errorMessage = it.message ?: "This layout backup is no longer valid." }
             }.onFailure { errorMessage = it.message ?: "This layout backup is no longer valid." }
         }
         return true

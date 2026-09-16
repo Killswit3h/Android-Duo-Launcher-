@@ -58,9 +58,16 @@ class LayoutBackupIntegrationTest {
         ready()
         val before = model().state.value
         val oldWidgetIds = before.widgetPlacements.map { it.id }.filter { it >= 0 }.toSet()
-        val preview = LayoutImportPreview(before.layout.copy(widgetPlacements = emptyList(), widgetRestores = emptyList()),
+        // A version 3 preview carries the whole schema-9 record, so it is built the way the decoder
+        // builds one: the imported layout spliced into a complete layout set, not a bare HomeLayout.
+        val target = before.activeTarget
+        val importedSet = before.layoutSet.withHomeLayout(
+            target, before.layout.copy(widgetPlacements = emptyList(), widgetRestores = emptyList()))
+        val preview = LayoutImportPreview(importedSet.homeLayout(target),
             emptyList(), emptyList(), before.homeSlots.filterNotNull().size, before.folders.size, 0,
-            before.compact, before.expanded, !before.labels, !before.googleSearch, !before.verticalStatus)
+            before.compact, before.expanded, !before.labels, !before.googleSearch, !before.verticalStatus,
+            layoutSet = importedSet, leadingPage = before.leadingPage, stacks = before.stacks,
+            hiddenApps = before.hiddenApps, iconOverrides = before.iconOverrides, settings = before.settings)
         try {
             compose.runOnIdle { assertTrue(model().applyImportedLayout(preview)) }
             assertTrue(oldWidgetIds.all { it in model().retainedWidgetIds })

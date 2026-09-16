@@ -26,4 +26,11 @@ Recorded so nobody re-researches them. Sources are in `specs/01-research-brief.m
 
 ## Raised during the build
 
-_(appended as work proceeds)_
+- **Consolidate the three existing TIME_TICK receivers** onto the shared ticker added for the Today View feeds (`MainActivity.kt:120`, `Appearance.kt:95` in `rememberSavedAppearance`, `DuneWallpaper.kt:124`). The new `SystemTimeTicker` is one registration that fans out and unregisters when its last subscriber leaves, so the three ad-hoc receivers can move onto it. Deferred because it touches three unrelated subsystems mid-build.
+- **`PRIVACY.md` had no entry for the notification-listener badge access** introduced with badges; the paragraph added with the Today View feeds now covers both badges and media. Worth a deliberate re-read of the whole file during the S6 docs pass rather than trusting the incremental edits.
+
+## Required before inspection (not deferred — tracked here so they are not forgotten)
+
+- **`HomeDragIntegrationTest.kt:203`** asserts a layout write is visible immediately after an edit. Layout writes are now debounced 150ms, so that read races. The fix belongs in the test fixture (flush or wait), not in production code.
+- **Instrumented gesture pass on the emulator.** The `LauncherScreen` split was verified only by JVM tests, which do not exercise Compose UI. One-page-per-swipe, native widget vertical scroll and scoped long-press pickup are covered exclusively by `app/src/androidTest` and must be run before this is called done.
+- **`rememberSaveable` keys shifted** when nine states moved into `HomeWorkspace`. Harmless across app upgrades (Android discards saved instance state on version change) but it is a real structural change worth confirming on device.

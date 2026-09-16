@@ -40,3 +40,7 @@ coverage/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# graft helper shims: generated locally with absolute paths baked in.
+# Regenerate with `graft init --agents claude`; never commit them.
+.claude/helpers/

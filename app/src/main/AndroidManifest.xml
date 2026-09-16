@@ -13,6 +13,9 @@
     <!-- Next 3 events in the Today View calendar widget (FR-59). Requested at the widget, not at
          startup; without it the widget shows the date alone. Events are read on demand, never stored. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Contact results in Search (FR-72). Requested from Search settings, never at startup; the
+         section simply does not exist until granted. Contacts are queried per keystroke, never cached. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <queries>
         <package android:name="com.google.android.googlequicksearchbox" />
         <intent>

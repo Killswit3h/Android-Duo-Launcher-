@@ -99,7 +99,10 @@ fun rememberDuoTypography(useSystemFont: Boolean = false): DuoTypography =
 
 val LocalDuoTypography = staticCompositionLocalOf { InterDuoTypography }
 
-internal val InterDuoTypography: DuoTypography = duoTypography(DuoFont.INTER)
+// Lazy on purpose. This is initialized during the file's static init, and duoTypography() reads
+// BaseDuoTypography, which is declared below it. Initializing eagerly reads that as null and kills
+// the launcher on its first frame -- a crash no unit test sees, because none of them compose.
+internal val InterDuoTypography: DuoTypography by lazy { duoTypography(DuoFont.INTER) }
 
 /** Sizes, weights and line heights, family-agnostic. */
 private val BaseDuoTypography = DuoTypography(

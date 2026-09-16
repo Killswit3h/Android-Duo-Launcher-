@@ -160,6 +160,8 @@ internal fun HomeWorkspace(
     widgetPickerBack: () -> Unit,
     openLibrary: () -> Unit,
     openDiscover: () -> Unit,
+    /** FR-51, FR-71: opens Duo's full-screen Search. */
+    openSearch: () -> Unit = {},
     sheetState: MutableState<String>,
     dockSlotState: MutableState<Int>,
     widgetSlotState: MutableState<Int>,
@@ -281,6 +283,13 @@ internal fun HomeWorkspace(
             widgets.reconfigureWidgetId == null
         val colors = currentDuoColors()
         val motionEnabled = rememberMotionEnabled()
+        // FR-55: every Discover entry point on Home — the leading overscroll, the pager swipe and the
+        // page-indicator button — is offered only when Discover is the leading page the user chose.
+        val discoverChosen = state.leadingPage.kind == LeadingPageKind.DISCOVER
+        // AC-38: a hidden page gets no dot, so the indicator agrees with what a swipe visits.
+        val hiddenPages = remember(surface.pageIds, surface.hiddenPageIds, homePages) {
+            hiddenPageNumbers(surface.pageIds, surface.hiddenPageIds, homePages)
+        }
         // FR-45, FR-46, FR-48, FR-49: Edit mode's verbs, defined once so that the compact and the
         // expanded workspaces behave identically and the lock is checked in exactly one place.
         val enterEditMode: () -> Unit = { edit.enter(surface.lockLayout) }
@@ -326,8 +335,28 @@ internal fun HomeWorkspace(
                         !nativeWidgetConsumesVerticalGesture(launcherRootView, screenPoint)
                 }
             },
-            onDownwardSwipe = launcherActivity::openSystemShade,
-            onLeadingOverscroll = if (firstHome == 0) onDiscover else null,
+            // FR-51: swipe down is a setting. Search is the fresh-install default; an upgrade that
+            // had shade gestures keeps Notifications with its 70/30 split; None does nothing.
+            onDownwardSwipe = when (state.settings.swipeDown) {
+                SwipeDownAction.SEARCH -> { _ -> openSearch() }
+                SwipeDownAction.NOTIFICATIONS -> launcherActivity::openSystemShade
+                SwipeDownAction.NONE -> null
+            },
+            // FR-55: overscrolling left from Home 1 opens Discover only when Discover is the chosen
+            // leading page. `firstHome` is also 0 for Today and Classic, so gating on it alone would
+            // launch Google's feed for a user who selected Today View.
+            onLeadingOverscroll = if (firstHome == 0 && discoverChosen) onDiscover else null,
+            // FR-52: swipe up opens the App Library. The start point is vetted by the same
+            // native-widget rule as swipe down, so a scrollable widget keeps its own upward scroll.
+            canStartUpwardSwipe = { point ->
+                if (pager.currentPage !in 0 until visibleHomePages) false else {
+                    val rootOnScreen = IntArray(2).also(launcherRootView::getLocationOnScreen)
+                    val screenPoint = point + gestureOriginInWindow +
+                        Offset(rootOnScreen[0].toFloat(), rootOnScreen[1].toFloat())
+                    !nativeWidgetConsumesVerticalGesture(launcherRootView, screenPoint)
+                }
+            },
+            onUpwardSwipe = if (state.settings.swipeUp == SwipeUpAction.APP_LIBRARY) openLibrary else null,
         )) {
         val pagerModifier = Modifier.align(pagerAlignment(surface.dockSide)).fillMaxHeight().width(pagerWidth)
             .drawWithContent {
@@ -335,8 +364,8 @@ internal fun HomeWorkspace(
                 drawLayer(homeLayer)
                 LiveDiscover.host.get()?.invalidateFrame()
             }.testTag("app-pager")
-            .discoverSwipe(firstHome == 0 && pager.currentPage == 0 && !drag.active && sheet.isEmpty() &&
-                !showFirstRun && selectedId == null, onDiscover)
+            .discoverSwipe(discoverChosen && firstHome == 0 && pager.currentPage == 0 && !drag.active &&
+                sheet.isEmpty() && !showFirstRun && selectedId == null, onDiscover)
             .onGloballyPositioned {
                 if (firstHome > 0) {
                     val bounds = it.boundsInWindow()
@@ -361,6 +390,7 @@ internal fun HomeWorkspace(
                     state = state, previewSlots = previewLayout.slots, previewLeadingSlots = previewLayout.leadingSlots,
                     previewWidgetPlacements = previewLayout.widgetPlacements, appsById = appsById,
                     widgets = widgets, drag = drag, target = target, insertionTarget = insertionTarget,
+                    model = model,
                     libraryQuery = libraryQuery, onLibraryQuery = { libraryQuery = it },
                     grid = grid, editing = edit.active, onRemoveItem = removeFromHome,
                     onRemoveWidget = confirmWidgetRemoval,
@@ -371,6 +401,18 @@ internal fun HomeWorkspace(
                     onFolder = { openFolderId = it },
                     onEmptyWidget = { emptyCellIndex = it },
                     onRefresh = model::refresh,
+                    // FR-55, FR-56: Today View takes the left pane of the first spread. Classic
+                    // keeps the leading grid, and Discover is a pager page rather than a pane.
+                    leadingPane = if (state.leadingPage.kind == LeadingPageKind.TODAY) {
+                        { paneModifier ->
+                            TodayPane(
+                                state = state, model = model, activity = launcherActivity,
+                                appsById = appsById, onLaunch = onLaunchFrom, modifier = paneModifier,
+                            )
+                        }
+                    } else {
+                        null
+                    },
                 )
             }
         } else {
@@ -386,9 +428,10 @@ internal fun HomeWorkspace(
                 if (page == -1) {
                     DiscoverContent(Modifier.fillMaxSize().padding(start = 16.dp, top = 16.dp, bottom = 16.dp))
                 } else if (page == visibleHomePages) {
-                    AppLibrary(state, libraryQuery, { libraryQuery = it }, onLaunch, model::setPinned,
-                        onActions = { selectedId = it.id }, modifier = Modifier.fillMaxSize().padding(start = 16.dp, top = 16.dp, bottom = bottomSpace).testTag("library-page"),
-                        drag = drag, page = visibleHomePages, onLaunchFrom = onLaunchFrom, onTurnOnWork = { model.turnOnWork(it) })
+                    HostedAppLibrary(state, model, libraryQuery, { libraryQuery = it }, onLaunch,
+                        onActions = { selectedId = it.id },
+                        modifier = Modifier.fillMaxSize().padding(start = 16.dp, top = 16.dp, bottom = bottomSpace).testTag("library-page"),
+                        drag = drag, page = visibleHomePages, onLaunchFrom = onLaunchFrom)
                 } else {
                     Row(Modifier.fillMaxSize().testTag("home-surface")) {
                         HomePagePane(page, state, previewLayout.slots, previewLayout.leadingSlots, previewLayout.widgetPlacements, appsById, geometry, contentHeight,
@@ -474,10 +517,10 @@ internal fun HomeWorkspace(
                 )) {
                 Row(Modifier.padding(horizontal = DuoTokens.space.sm),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                    if (!drag.active) IconButton(onClick = openDiscover, Modifier.size(32.dp).testTag("discover-page-link")) {
+                    if (!drag.active && discoverChosen) IconButton(onClick = openDiscover, Modifier.size(32.dp).testTag("discover-page-link")) {
                         Icon(Icons.Rounded.Explore, "Discover", tint = colors.label2, modifier = Modifier.size(17.dp))
                     }
-                    if (visibleHomePages <= 6) repeat(visibleHomePages) { index ->
+                    if (visibleHomePages <= 6) (0 until visibleHomePages).filterNot { it in hiddenPages }.forEach { index ->
                         Box(Modifier.size(28.dp).clip(CircleShape).clickable { scope.launch { pager.animateScrollToPage(index) } }
                             .semantics { contentDescription = if (index == homePages) "New home page" else "Home page ${index + 1}" }, contentAlignment = Alignment.Center) {
                             if (index == homePages) Icon(Icons.Rounded.Add, null, tint = colors.label1, modifier = Modifier.size(14.dp))
@@ -499,8 +542,9 @@ internal fun HomeWorkspace(
             if (pager.currentPage == -1) CircleControl(Icons.Rounded.ArrowForward, "Back to home", "discover-home", controlSize) { scope.launch { pager.animateScrollToPage(0) } }
             val searchBounds = remember { android.graphics.Rect() }
             Box(Modifier.onGloballyPositioned { searchBounds.set(it.boundsInWindow().toAndroidBounds()) }) {
-                CircleControl(Icons.Rounded.Search, if (state.googleSearch) "Search Google" else "Search apps", "search", controlSize) {
-                    if (!state.googleSearch || !onGoogleSearch(searchBounds)) openLibrary()
+                CircleControl(Icons.Rounded.Search, if (state.googleSearch) "Search Google" else "Search", "search", controlSize) {
+                    // FR-71: Duo's own Search, unless the user chose to hand search to Google.
+                    if (!state.googleSearch || !onGoogleSearch(searchBounds)) openSearch()
                 }
             }
         }
@@ -524,7 +568,10 @@ internal fun HomeWorkspace(
         )
         FirstRunSheetHost(
             showFirstRun = showFirstRun, isDefaultHome = isDefaultHome, model = model,
-            pager = pager, homePages = homePages, grid = grid, onMakeDefault = onMakeDefault,
+            pager = pager, homePages = homePages, grid = grid,
+            settings = state.settings, appearanceMode = appearance.mode,
+            onAppearanceMode = onAppearanceMode, onOpenShadeAccess = onShadeSetup,
+            onMakeDefault = onMakeDefault,
             onFinishFirstRun = onFinishFirstRun, sheetState = sheetState,
             widgetSlotState = widgetSlotState, widgetTargetIndexState = widgetTargetIndexState,
             widgetPackageState = widgetPackageState,

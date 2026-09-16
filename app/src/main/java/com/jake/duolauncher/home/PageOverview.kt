@@ -133,6 +133,36 @@ fun toggleHiddenPage(hidden: Set<Int>, pageId: Int, allPageIds: List<Int>): Set<
 /** The pages a swipe actually visits, in order — hidden pages are skipped, not deleted (AC-38). */
 fun visiblePageOrder(order: List<Int>, hidden: Set<Int>): List<Int> = order.filterNot { it in hidden }
 
+/**
+ * The page *numbers* whose stable ids the user hid (AC-38).
+ *
+ * Hiding is stored against ids so that a reorder never re-points it, but the pager addresses pages
+ * by number, so this is the translation between the two. A page with no id yet cannot have been
+ * hidden, so it is never reported.
+ */
+fun hiddenPageNumbers(pageIds: List<Int>, hidden: Set<Int>, pageCount: Int): Set<Int> {
+    if (hidden.isEmpty()) return emptySet()
+    return (0 until pageCount).filterTo(mutableSetOf()) { page ->
+        pageIds.getOrNull(page)?.let { it in hidden } == true
+    }
+}
+
+/**
+ * Where a swipe that came to rest on a hidden page should settle instead (AC-38).
+ *
+ * It keeps going the way the user was travelling, so swiping forward past a hidden page lands on the
+ * page after it, exactly as if the hidden page were not there. Only when every page that way is
+ * hidden does it turn back. Null only if *every* page is hidden, which [toggleHiddenPage] prevents.
+ *
+ * [pageCount] should include any trailing page that can never be hidden — the App Library — so that
+ * swiping forward past a hidden last Home page reaches the library rather than bouncing back.
+ */
+fun nextVisiblePage(page: Int, forward: Boolean, pageCount: Int, hidden: Set<Int>): Int? {
+    val ahead = if (forward) (page + 1 until pageCount) else (page - 1 downTo 0)
+    val behind = if (forward) (page - 1 downTo 0) else (page + 1 until pageCount)
+    return ahead.firstOrNull { it !in hidden } ?: behind.firstOrNull { it !in hidden }
+}
+
 /** FR-47: an empty page can be deleted, as long as it is not the only page left. */
 fun canDeletePage(summary: HomePageSummary, totalPages: Int): Boolean =
     summary.isEmpty && totalPages > 1

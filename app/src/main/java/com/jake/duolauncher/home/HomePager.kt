@@ -82,6 +82,8 @@ internal fun ExpandedWorkspace(
     drag: HomeDragState,
     target: DropTarget?,
     insertionTarget: DropTarget?,
+    /** Supplies the App Library's pin, work-profile and remembered-view writes (FR-69, FR-70). */
+    model: com.jake.duolauncher.LauncherModel,
     libraryQuery: String,
     onLibraryQuery: (String) -> Unit,
     grid: GridSpec = DEFAULT_GRID,
@@ -99,6 +101,15 @@ internal fun ExpandedWorkspace(
     onFolder: (String) -> Unit,
     onEmptyWidget: (Int) -> Unit,
     onRefresh: () -> Unit,
+    /**
+     * FR-55, FR-56: what the leading pane draws.
+     *
+     * Null keeps the Classic workspace grid, which is both the upgrade default and what the
+     * Classic leading-page setting selects. Supplying it replaces that grid with the Today View
+     * column, giving the first spread the widget column on the left and Home 1 on the right
+     * (AC-45) without the pager's page numbering changing at all.
+     */
+    leadingPane: (@Composable (Modifier) -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val viewportWidth = motion.pageWidth
@@ -163,15 +174,22 @@ internal fun ExpandedWorkspace(
             key("expanded-leading-home") {
                 Box(Modifier.place(leadingX).width((geometry.gridWidth + 16f).dp).fillMaxHeight()
                     .testTag("expanded-leading-home")) {
-                    HomePagePane(
-                        -1, state, previewSlots, previewLeadingSlots, previewWidgetPlacements, appsById, geometry, contentHeight, bottomSpace,
-                        widgets, drag, target, insertionTarget, showLargeWidget = true,
-                        grid = grid, editing = editing, onRemoveItem = onRemoveItem, onRemoveWidget = onRemoveWidget,
-                        onEditMode = onEditMode, onBackgroundTap = onBackgroundTap,
-                        onLaunch = onLaunchFrom, onActions = onActions, onWidget = onWidget,
-                        onFolder = onFolder, onEmptyWidget = onEmptyWidget, onRefresh = onRefresh,
-                        modifier = Modifier,
-                    )
+                    if (leadingPane != null) {
+                        leadingPane(
+                            Modifier.fillMaxSize()
+                                .padding(start = 16.dp, top = geometry.contentTop.dp, bottom = bottomSpace),
+                        )
+                    } else {
+                        HomePagePane(
+                            -1, state, previewSlots, previewLeadingSlots, previewWidgetPlacements, appsById, geometry, contentHeight, bottomSpace,
+                            widgets, drag, target, insertionTarget, showLargeWidget = true,
+                            grid = grid, editing = editing, onRemoveItem = onRemoveItem, onRemoveWidget = onRemoveWidget,
+                            onEditMode = onEditMode, onBackgroundTap = onBackgroundTap,
+                            onLaunch = onLaunchFrom, onActions = onActions, onWidget = onWidget,
+                            onFolder = onFolder, onEmptyWidget = onEmptyWidget, onRefresh = onRefresh,
+                            modifier = Modifier,
+                        )
+                    }
                 }
             }
         }
@@ -199,11 +217,11 @@ internal fun ExpandedWorkspace(
         if (showLibrary) {
             key("library-pane") {
                 Box(Modifier.place((visibleHomePages - 1) * stride + viewportWidth).fillMaxSize()) {
-                    AppLibrary(state, libraryQuery, onLibraryQuery, onLaunch, onPinned,
+                    HostedAppLibrary(state, model, libraryQuery, onLibraryQuery, onLaunch,
                         onActions = onActions,
                         modifier = Modifier.fillMaxSize().padding(start = 16.dp, top = 16.dp, bottom = bottomSpace)
                             .testTag("library-page"),
-                        drag = drag, page = visibleHomePages, onLaunchFrom = onLaunchFrom, onTurnOnWork = onTurnOnWork)
+                        drag = drag, page = visibleHomePages, onLaunchFrom = onLaunchFrom)
                 }
             }
         }

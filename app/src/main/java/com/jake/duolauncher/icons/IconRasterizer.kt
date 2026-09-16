@@ -220,8 +220,18 @@ internal object IconRasterizer {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
     }
 
+    /**
+     * The mask is [Bitmap.Config.ARGB_8888] rather than `ALPHA_8`.
+     *
+     * An alpha-only bitmap carries no colour of its own, so `drawBitmap` has to take the source
+     * colour from the paint — and a paint whose whole job is to carry a `DST_IN` xfermode does not
+     * reliably supply one. The result on device was a source treated as fully opaque everywhere,
+     * which makes `DST_IN` a no-op and leaves every icon an unmasked square. Four bytes per pixel
+     * for one cached mask per (shape, size) is a negligible cost for a composite that actually
+     * happens.
+     */
     private fun buildMask(shape: IconShape, size: Int): Bitmap {
-        val mask = Bitmap.createBitmap(size, size, Bitmap.Config.ALPHA_8)
+        val mask = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
         Canvas(mask).drawPath(maskPath(shape, size), paint)
         return mask

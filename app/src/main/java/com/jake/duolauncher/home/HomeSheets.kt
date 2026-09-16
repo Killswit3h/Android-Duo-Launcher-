@@ -146,8 +146,34 @@ internal fun HomeSheetHost(
     var resizeConstraints by resizeConstraintsState
 
 
-    if (sheet.isNotEmpty() && sheet != "widgets") {
-        val activeCustomizationPage = if (sheet == "settings:wallpaper") CustomizationPage.WALLPAPER else customizationPage
+    // FR-79, FR-80: Duo Settings replaces the old customization sheet, and is full-screen rather
+    // than modal, so it is hosted beside the sheet the remaining destinations share.
+    if (sheet == "settings" || sheet == "settings:wallpaper") {
+        DuoSettingsOverlay(
+            state = state,
+            model = model,
+            activity = launcherActivity,
+            appearance = appearance,
+            isDefaultHome = isDefaultHome,
+            onClose = { customizationPage = CustomizationPage.OVERVIEW; sheet = "" },
+            onMakeDefault = { sheet = ""; onMakeDefault() },
+            onAddWidget = {
+                widgetSlot = model.nextWidgetSlot()
+                widgetTargetIndex = pager.currentPage.coerceIn(0, homePages - 1) * state.grid.cells
+                widgetPackage = null
+                widgetProfileSerial = null
+                widgetExactTarget = false
+                sheet = "widgets"
+            },
+            onShadeSetup = { sheet = ""; onShadeSetup() },
+            onWallpaperPreview = { sheet = ""; onWallpaperPreview() },
+            onLaunch = onLaunch,
+            onAppearanceMode = onAppearanceMode,
+            onAppearanceManual = onAppearanceManual,
+            onAppearanceDeviceLocation = onAppearanceDeviceLocation,
+            onAppearanceClear = onAppearanceClear,
+        )
+    } else if (sheet.isNotEmpty() && sheet != "widgets") {
         ModalBottomSheet(onDismissRequest = {
             customizationPage = CustomizationPage.OVERVIEW
             sheet = ""; widgetPackage = null; widgetExactTarget = false
@@ -155,14 +181,8 @@ internal fun HomeSheetHost(
             properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
             containerColor = MaterialTheme.colorScheme.surface) {
             ModalDialogBackHandler {
-                if ((sheet == "settings" || sheet == "settings:wallpaper") &&
-                    activeCustomizationPage != CustomizationPage.OVERVIEW) {
-                    customizationPage = CustomizationPage.OVERVIEW
-                    sheet = "settings"
-                } else {
-                    customizationPage = CustomizationPage.OVERVIEW
-                    sheet = ""; widgetPackage = null; widgetExactTarget = false
-                }
+                customizationPage = CustomizationPage.OVERVIEW
+                sheet = ""; widgetPackage = null; widgetExactTarget = false
             }
             when (sheet) {
                 "dock" -> AppPicker(state.apps, dockSlot,
@@ -179,25 +199,10 @@ internal fun HomeSheetHost(
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = { sheet = "" }) { Text("Done") }
                     }
-                    AppLibrary(state, pinQuery, { pinQuery = it }, onLaunch, model::setPinned,
-                        onActions = { selectedId = it.id; sheet = "" }, editing = true, modifier = Modifier.weight(1f).fillMaxWidth(),
-                        onTurnOnWork = { model.turnOnWork(it) })
+                    HostedAppLibrary(state, model, pinQuery, { pinQuery = it }, onLaunch,
+                        onActions = { selectedId = it.id; sheet = "" }, editing = true,
+                        modifier = Modifier.weight(1f).fillMaxWidth())
                 }
-                "settings", "settings:wallpaper" -> CustomizationSheet(state, wide, model, isDefaultHome,
-                    page = activeCustomizationPage, onPage = { customizationPage = it; sheet = "settings" },
-                    onMakeDefault = { sheet = ""; onMakeDefault() },
-                    onClose = { customizationPage = CustomizationPage.OVERVIEW; sheet = "" }, onEditPins = { sheet = "pins" },
-                    onWidget = { widgetSlot = it; widgetPackage = null; widgetProfileSerial = null; widgetExactTarget = false; sheet = "widgets" },
-                    onAddWidget = { page -> widgetSlot = model.nextWidgetSlot(); widgetTargetIndex = page * state.grid.cells; widgetPackage = null; widgetProfileSerial = null; widgetExactTarget = false; sheet = "widgets" },
-                    onRemoveWidget = widgets::remove,
-                    onExportLayout = { sheet = ""; launcherActivity.backups.startExport() },
-                    onImportLayout = { sheet = ""; launcherActivity.backups.startImport() },
-                    appearance = appearance, onAppearanceMode = onAppearanceMode,
-                    onAppearanceManual = onAppearanceManual, onAppearanceDeviceLocation = onAppearanceDeviceLocation,
-                    onAppearanceClear = onAppearanceClear,
-                    onShadeSetup = { sheet = ""; onShadeSetup() },
-                    backgrounds = launcherActivity.backgrounds,
-                    onWallpaperPreview = { sheet = ""; onWallpaperPreview() }, homePage = pager.currentPage.coerceIn(0, homePages - 1))
                 "widgetActions" -> model.placement(widgetSlot)?.let { placement ->
                     val grid = state.grid
                     val topPitch = (geometry.widgetHeight + 18f) / 2f
@@ -245,6 +250,18 @@ internal fun FirstRunSheetHost(
     homePages: Int,
     /** FR-31: the first widget lands on the active layout's grid, not a fixed 4x6. */
     grid: GridSpec = DEFAULT_GRID,
+    /**
+     * FR-81's **Choose look** step. The sheet owns no storage, so its three selections are written
+     * straight through to the settings store; without these the step rendered and changed nothing.
+     */
+    settings: DuoSettings = DuoSettings(),
+    appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
+    onAppearanceMode: (AppearanceMode) -> Unit = {},
+    /**
+     * Routes the Gestures step through the activity's own shade setup, which keeps the Discover
+     * ownership token held across the trip to Android's Accessibility settings.
+     */
+    onOpenShadeAccess: (() -> Unit)? = null,
     onMakeDefault: () -> Unit,
     onFinishFirstRun: () -> Unit,
     sheetState: MutableState<String>,
@@ -283,6 +300,13 @@ internal fun FirstRunSheetHost(
                 },
                 onExplore = onFinishFirstRun,
                 onSkip = onFinishFirstRun,
+                appearanceMode = appearanceMode,
+                onAppearanceMode = onAppearanceMode,
+                glassLevel = settings.glassLevel,
+                onGlassLevel = model::setGlass,
+                iconAppearance = settings.iconAppearance,
+                onIconAppearance = model::setIconAppearance,
+                onOpenShadeAccess = onOpenShadeAccess,
             )
         }
     }

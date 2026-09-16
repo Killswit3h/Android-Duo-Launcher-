@@ -332,6 +332,74 @@ fun migrateSchema5Apps(slots: List<String?>): List<String?> {
     return normalizeHomeSlots(result)
 }
 
+// ---------------------------------------------------------------------------
+// Page overview edits (FR-47). Pure, so every rule is unit tested.
+// ---------------------------------------------------------------------------
+
+/**
+ * Moves the page at position [from] to position [to], carrying its contents with it.
+ *
+ * A page is not just a slice of [DuoLayout.slots]: its widgets name it by number and its identity is
+ * its entry in [DuoLayout.pageIds]. All three move together, so a reorder is invisible to anything
+ * keyed on the page's id — which is exactly what stops `hiddenPageIds` from following the *position*
+ * and hiding an unrelated page after a move.
+ *
+ * Out-of-range positions are clamped rather than throwing, because the overview's move buttons sit
+ * at the ends of a row and a double tap must not take Home down.
+ */
+fun reorderHomePages(layout: DuoLayout, from: Int, to: Int): DuoLayout {
+    val pages = layout.pageCount
+    if (pages < 2) return layout
+    val source = from.coerceIn(0, pages - 1)
+    val destination = to.coerceIn(0, pages - 1)
+    if (source == destination) return layout
+    val order = (0 until pages).toMutableList().apply { add(destination, removeAt(source)) }
+    val grid = layout.grid
+    val slots = MutableList<String?>(pages * grid.cells) { null }
+    order.forEachIndexed { newPage, oldPage ->
+        repeat(grid.cells) { local ->
+            slots[newPage * grid.cells + local] = layout.slots.getOrNull(oldPage * grid.cells + local)
+        }
+    }
+    val movedTo = order.withIndex().associate { (newPage, oldPage) -> oldPage to newPage }
+    val ids = layout.withPageIds().pageIds
+    return layout.copy(
+        slots = slots.dropLastWhile { it == null },
+        // The leading page is page -1 and is never part of the ordinary page order.
+        widgetPlacements = layout.widgetPlacements
+            .map { if (it.page >= 0) it.copy(page = movedTo[it.page] ?: it.page) else it }
+            .sortedBy { it.slot },
+        pageIds = order.map { ids.getOrNull(it) ?: it },
+    )
+}
+
+/**
+ * Deletes the page whose stable id is [pageId] (FR-47).
+ *
+ * Refuses unless the page is genuinely empty and is not the last one, so this can never destroy a
+ * placement: [canDeletePage] gates the button, and this gates the edit. Later pages shift down, and
+ * the deleted page's hidden-state entry goes with it rather than being left to collide with a future
+ * page that is minted the same id.
+ */
+fun deleteHomePage(layout: DuoLayout, pageId: Int): DuoLayout {
+    val withIds = layout.withPageIds()
+    val page = withIds.pageIds.indexOf(pageId)
+    if (page < 0 || withIds.pageCount <= 1) return layout
+    val grid = withIds.grid
+    val start = page * grid.cells
+    val occupied = (0 until grid.cells).any { withIds.slots.getOrNull(start + it) != null } ||
+        withIds.widgetPlacements.any { it.page == page }
+    if (occupied) return layout
+    val slots = withIds.slots.toMutableList()
+    repeat(minOf(grid.cells, (slots.size - start).coerceAtLeast(0))) { slots.removeAt(start) }
+    return withIds.copy(
+        slots = slots.dropLastWhile { it == null },
+        widgetPlacements = withIds.widgetPlacements.map { if (it.page > page) it.copy(page = it.page - 1) else it },
+        pageIds = withIds.pageIds.filterIndexed { index, _ -> index != page },
+        hiddenPageIds = withIds.hiddenPageIds - pageId,
+    )
+}
+
 fun migrateSchema5Widgets(widgets: List<Int>): List<WidgetPlacement> = buildList {
     widgets.forEachIndexed { slot, id ->
         if (id == EMPTY_WIDGET) return@forEachIndexed

@@ -105,5 +105,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!--
+            FR-80's third route into Duo Settings: a launcher entry of its own, so the settings are
+            reachable from the app list even when Duo is not the Home app and Edit mode is therefore
+            out of reach. An alias rather than a second activity, because it opens the same
+            singleTask MainActivity; MainActivity reads the component name it was started with and
+            routes straight to Settings.
+        -->
+        <activity-alias android:name=".DuoSettingsAlias"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:label="Duo Settings"
+            android:icon="@drawable/ic_launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
     </application>
 </manifest>

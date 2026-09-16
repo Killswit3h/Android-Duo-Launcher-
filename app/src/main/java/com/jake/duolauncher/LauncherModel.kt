@@ -18,6 +18,7 @@ import com.jake.duolauncher.shortcuts.HomeLayoutLock
 import com.jake.duolauncher.shortcuts.HomeLayoutUnlock
 import com.jake.duolauncher.shortcuts.PinItemKind
 import com.jake.duolauncher.shortcuts.PinnedItem
+import com.jake.duolauncher.home.toggleHiddenPage
 import com.jake.duolauncher.shortcuts.PinnedItemPlacer
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -63,7 +64,8 @@ data class LauncherState(
     val leadingSlots: List<String?> = List(HOME_CELLS) { null },
     val editRevision: Int = 0,
     val canUndoEdit: Boolean = false,
-    val dock: List<String?> = List(4) { null },
+    /** Always exactly `layoutSet.dock.capacity` slots once derived (FR-38). */
+    val dock: List<String?> = List(DEFAULT_DOCK_CAPACITY) { null },
     val widgetPlacements: List<WidgetPlacement> = DEFAULT_WIDGET_PLACEMENTS,
     val widgetRestores: List<WidgetRestore> = emptyList(),
     val googleSearch: Boolean = true,
@@ -716,6 +718,69 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     fun setLeadingPage(kind: LeadingPageKind) = commitState(
         mutable.value.let { it.copy(leadingPage = it.leadingPage.copy(kind = kind)) })
 
+    // -----------------------------------------------------------------------------------------
+    // Page overview (FR-47)
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * FR-47: moves a Home page, taking its contents with it.
+     *
+     * [from] and [to] are page *positions*, which is what the overview's move buttons report. The
+     * page's cells, its widgets and its stable id all travel together, so hiding state keyed on the
+     * id keeps pointing at the same page after a move.
+     */
+    fun reorderPages(from: Int, to: Int): Boolean = commitActiveLayout { reorderHomePages(it, from, to) }
+
+    /**
+     * FR-47: hides or shows the page with [pageId]. Its contents are kept either way, and the last
+     * visible page cannot be hidden — [toggleHiddenPage] owns that rule.
+     */
+    fun setPageHidden(pageId: Int): Boolean = commitActiveLayout { layout ->
+        val withIds = layout.withPageIds()
+        withIds.copy(hiddenPageIds = toggleHiddenPage(withIds.hiddenPageIds, pageId, withIds.pageIds))
+    }
+
+    /** FR-47: deletes an empty page. [deleteHomePage] refuses a page that still holds anything. */
+    fun deletePage(pageId: Int): Boolean = commitActiveLayout { deleteHomePage(it, pageId) }
+
+    /**
+     * One undoable edit to the active [DuoLayout], committed exactly the way [commitLayout] commits
+     * a [HomeLayout]: one assignment, one undo snapshot, one persist.
+     */
+    private fun commitActiveLayout(transform: (DuoLayout) -> DuoLayout): Boolean {
+        if (statePayloadInvalid) return false
+        val old = mutable.value
+        if (old.layoutLocked) return false
+        val target = old.activeTarget
+        val current = old.layoutSet.layout(target)
+        val next = transform(current).withPageIds()
+        if (next == current) return false
+        val updated = old.withLayoutSet(old.layoutSet.withLayout(target, next))
+            .copy(editRevision = old.editRevision + 1, canUndoEdit = true)
+        undoLayout = old to updated
+        mutable.value = updated
+        persist()
+        return true
+    }
+
+    /**
+     * FR-57: replaces the whole Today column in one edit.
+     *
+     * The column is drawn from a *resolved* list — a fresh install shows a default column that has
+     * never been written to disk — so an edit cannot be expressed as "insert into what is stored":
+     * moving the second default widget up has to commit all four, not one. The host resolves the
+     * column, applies the edit and hands the result here, which keeps the defaults out of storage
+     * until the user actually touches them and keeps every edit a single commit.
+     *
+     * Blank and duplicate ids are dropped rather than rejected, because an id is also a Compose key.
+     */
+    fun setTodayItems(ids: List<String>) {
+        val cleaned = ids.filter { it.isNotBlank() }.distinct()
+        val old = mutable.value
+        if (cleaned == old.leadingPage.today) return
+        commitState(old.copy(leadingPage = old.leadingPage.copy(today = cleaned)))
+    }
+
     /** FR-57. */
     fun addToToday(itemId: String, index: Int? = null) {
         val old = mutable.value
@@ -1042,12 +1107,22 @@ internal const val RECOVERED_BANNER = "Duo restored your last saved layout"
 /** FR-83's sibling for the live layout: a payload from a newer build is left untouched. */
 internal const val NEWER_VERSION_BANNER = "This layout was saved by a newer Duo version."
 
-/** Rebuilds the flat active-layout fields from [set] so the two can never disagree. */
+/**
+ * Rebuilds the flat active-layout fields from [set] so the two can never disagree.
+ *
+ * The dock is normalized to its own capacity on the way through (FR-38). Every dock rule downstream
+ * — `canPlaceInDock`, `dockSlots`, `dockAcceptsDrop` and the rail itself — counts the slots it is
+ * given, so a `DockConfig` whose `items` had drifted from `capacity` would make a six-slot dock
+ * reject a drop at four. Normalizing in the one place the flat fields are derived also keeps the
+ * persisted payload satisfying `validate`'s "dock items must match capacity".
+ */
 internal fun LauncherState.withLayoutSet(set: LayoutSet): LauncherState {
     val target = set.targetFor(expandedActive)
-    val active = set.homeLayout(target)
+    val sanitized = set.dock.sanitized()
+    val normalized = if (sanitized == set.dock) set else set.copy(dock = sanitized)
+    val active = normalized.homeLayout(target)
     return copy(
-        layoutSet = set,
+        layoutSet = normalized,
         grid = active.grid,
         homeSlots = active.slots,
         leadingSlots = active.leadingSlots,

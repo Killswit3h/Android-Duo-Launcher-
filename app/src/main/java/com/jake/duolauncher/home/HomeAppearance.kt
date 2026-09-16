@@ -13,6 +13,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import com.jake.duolauncher.DuoBadgeStyle
+import com.jake.duolauncher.LauncherState
 import com.jake.duolauncher.badges.BadgeCount
 import com.jake.duolauncher.badges.DuoBadgeRepository
 import com.jake.duolauncher.badges.DuoBadges
@@ -72,6 +74,38 @@ data class HomeAppearance(
 
     /** The displayed size of an icon whose slider size is [baseDp] (FR-17). Pure. */
     fun iconSizeDp(baseDp: Float): Float = if (largeIcons) baseDp * LARGE_ICON_SCALE else baseDp
+}
+
+/**
+ * The [HomeAppearance] described by the persisted settings (FR-5, FR-6, FR-14 to FR-17, FR-20).
+ *
+ * This is the adapter the schema-9 settings block was waiting for: without it every Home surface
+ * renders the *defaults* no matter what the user chose, so the glass slider, icon appearance, icon
+ * shape, tint, icon pack, Large icons and badge style all move in Settings and change nothing on
+ * screen. Deliberately the only place these fields are read, so a rename breaks one function.
+ */
+fun homeAppearanceOf(state: LauncherState): HomeAppearance {
+    val settings = state.settings
+    return HomeAppearance(
+        iconStyle = IconStyle(
+            appearance = settings.iconAppearance,
+            tint = settings.iconTint,
+            tintIntensity = settings.iconTintIntensity,
+            shape = settings.iconShape,
+            pack = settings.iconPack,
+        ),
+        largeIcons = settings.largeIcons,
+        labels = state.labels,
+        badgeStyle = when (settings.badgeStyle) {
+            DuoBadgeStyle.NUMBER -> BadgeStyle.NUMBER
+            else -> BadgeStyle.DOT
+        },
+        // FR-20: the stored style carries the off switch as a third case, so "no badges" is a
+        // style rather than a separate flag. Collapsing OFF into DOT would leave the toggle inert.
+        badgesEnabled = settings.badgeStyle != DuoBadgeStyle.OFF,
+        glass = settings.glassLevel,
+        reduceTransparency = settings.reduceTransparency,
+    )
 }
 
 /** The appearance every `home/` surface reads. Supplied by `LauncherScreen`. */

@@ -31,6 +31,15 @@ Recorded so nobody re-researches them. Sources are in `specs/01-research-brief.m
 
 ## Required before inspection (not deferred — tracked here so they are not forgotten)
 
+- **FR-77 is not enforced end to end.** The security review found `PrivateSpaceGate` has zero consumers in main source apart from badges. Until the gate is wired into the App Library, the search providers, `SuggestionExclusions.isPrivateSpaceLocked` and Home item filtering, a locked private space's apps remain visible in those surfaces. This is a blocking correctness item, not a polish item.
+- **FR-49 is not enforced for pin requests.** `DuoPinRequests.layoutLock` and `.unlock` are registered nowhere, so a locked Home layout does not actually refuse an incoming pin request. The schema-9 task owns that wiring.
+- **Verify the private-space and lock wiring with tests that fail without it**, since both gaps were invisible to a green build and a passing suite.
+
+## Security hardening deferred with a deliberate decision
+
+- **Tapjacking on the exported pin sheet.** `PinItemActivity` sets no `filterTouchesWhenObscured`, so an app holding `SYSTEM_ALERT_WINDOW` could overlay it and harvest a tap on **Add**. Impact is capped at pinning an item the user did not intend; nothing leaves the device. Deferred only because the pin sheet's UI was being restyled concurrently — worth doing once that settles.
+- **The uninstall hand-off is an implicit intent.** Any app can register an `ACTION_DELETE` filter and show a convincing fake uninstall prompt. Hardening means resolving the handler and requiring a system flag before starting it.
+
 - **`HomeDragIntegrationTest.kt:203`** asserts a layout write is visible immediately after an edit. Layout writes are now debounced 150ms, so that read races. The fix belongs in the test fixture (flush or wait), not in production code.
 - **Instrumented gesture pass on the emulator.** The `LauncherScreen` split was verified only by JVM tests, which do not exercise Compose UI. One-page-per-swipe, native widget vertical scroll and scoped long-press pickup are covered exclusively by `app/src/androidTest` and must be run before this is called done.
 - **`rememberSaveable` keys shifted** when nine states moved into `HomeWorkspace`. Harmless across app upgrades (Android discards saved instance state on version change) but it is a real structural change worth confirming on device.

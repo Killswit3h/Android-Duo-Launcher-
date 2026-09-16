@@ -4,15 +4,13 @@ import android.app.Application
 import android.content.ComponentName
 import android.content.pm.LauncherApps
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Path
-import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
 import android.os.Process
 import android.os.UserHandle
 import android.os.UserManager
-import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.AndroidViewModel
+import com.jake.duolauncher.icons.IconRasterizer
+import com.jake.duolauncher.icons.IconStyle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,6 +77,12 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     private var statePayloadInvalid = false
     private val mutable = MutableStateFlow(load())
     val state = mutable.asStateFlow()
+    // An edit arms a 150 ms debounce; the serialization and disk write run on IO (NFR-P5).
+    // onStop/onCleared flush synchronously so a pending edit can never be lost to a process kill.
+    private val persistence = DebouncedPersistence(
+        scheduler = CoroutinePersistenceScheduler(viewModelScope, Dispatchers.IO),
+        serialize = ::serializeState, write = ::writeState)
+    private var persistRequested = false
     private var undoLayout: Pair<HomeLayout, HomeLayout>? = null
     private var undoImportSettings: UndoImportSettings? = null
     private var refreshing = false
@@ -197,7 +201,8 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
                 mutable.update { old ->
                     val entries = apps.entries
                     val profiles = apps.profiles
-                    val dock = if (!prefs.getBoolean("initialized", false)) initialDock(entries) else old.dock
+                    // persistRequested covers the debounce window before "initialized" reaches disk.
+                    val dock = if (!persistRequested && !prefs.getBoolean("initialized", false)) initialDock(entries) else old.dock
                     val installed = entries.map { it.id }
                     val legacyPins = if (needsMigration) migrateHomePins(old.order, installed, suggestedPins(entries, dock))
                         else old.homeSlots
@@ -461,6 +466,15 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
 
     private fun persist() {
         if (needsMigration || statePayloadInvalid) return
+        // The guard is evaluated now; serialization and the write are deferred and coalesced.
+        persistRequested = true
+        persistence.request()
+    }
+
+    /** Writes a pending edit synchronously, for paths where the process may be killed next. */
+    internal fun flushPersistence() = persistence.flush()
+
+    private fun serializeState(): String {
         val s = mutable.value
         fun preset(p: LayoutPreset) = JSONObject().put("iconSize", p.iconSize).put("rowGap", p.rowGap)
             .put("dockWidth", p.dockWidth).put("dockPosition", p.dockPosition).put("dockAlignToGrid", p.dockAlignToGrid)
@@ -481,6 +495,10 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
             .put("googleSearch", s.googleSearch)
             .put("verticalStatus", s.verticalStatus)
             .put("compact", preset(s.compact)).put("expanded", preset(s.expanded))
+        return data.toString()
+    }
+
+    private fun writeState(json: String) {
         val editor = prefs.edit()
         if (legacyRaw != null && sourceSchema == 2 && !prefs.contains("state_v2_backup"))
             editor.putString("state_v2_backup", legacyRaw)
@@ -494,7 +512,7 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
             editor.putString("state_v6_backup", legacyRaw)
         if (legacyRaw != null && sourceSchema < 8 && !prefs.contains("state_v7_backup"))
             editor.putString("state_v7_backup", legacyRaw)
-        editor.putString("state", data.toString()).putBoolean("initialized", true).apply()
+        editor.putString("state", json).putBoolean("initialized", true).apply()
     }
 
     private fun load(): LauncherState = runCatching {
@@ -623,17 +641,28 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         LauncherState(loading = false, error = "Saved Home layout could not be read; it was left unchanged.")
     }
 
-    override fun onCleared() { launcherApps.unregisterCallback(callback) }
+    override fun onCleared() {
+        // viewModelScope is already cancelled here, so this flush has to be synchronous.
+        flushPersistence()
+        launcherApps.unregisterCallback(callback)
+    }
 }
 
-/** Render adaptive layers through our rounded-square mask, preserving original app artwork. */
-private fun launcherIcon(drawable: Drawable): Bitmap {
-    if (drawable !is AdaptiveIconDrawable) return drawable.toBitmap(144, 144)
-    val bitmap = Bitmap.createBitmap(144, 144, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    canvas.clipPath(Path().apply { addRoundRect(0f, 0f, 144f, 144f, 34f, 34f, Path.Direction.CW) })
-    drawable.setBounds(0, 0, 144, 144)
-    drawable.background?.draw(canvas)
-    drawable.foreground?.draw(canvas)
-    return bitmap
-}
+/**
+ * The catalog thumbnail carried by [AppEntry], rendered through the icon pipeline so adaptive
+ * layers get the real squircle mask and its anti-aliased edge (FR-16) instead of the hard-edged
+ * rounded-rectangle clip this used to apply.
+ *
+ * The size stays a fixed budget on purpose. This bitmap is one shared thumbnail held for *every*
+ * installed app for as long as the catalog lives, so making it density-correct would multiply a
+ * 300-app catalog's footprint by the display density and put NFR-P4's PSS budget at risk. Icons
+ * that are actually drawn go through `icons.DuoIconRenderer`, which renders at the display's real
+ * pixel size (FR-12) and is bounded by its own 64 MB LRU. This thumbnail disappears with
+ * `AppEntry`'s bitmap when B3's icon-key refactor lands.
+ */
+private const val CATALOG_ICON_PX = 144
+
+private val CATALOG_ICON_STYLE = IconStyle()
+
+private fun launcherIcon(drawable: Drawable): Bitmap =
+    IconRasterizer.rasterize(drawable, CATALOG_ICON_PX, CATALOG_ICON_STYLE)

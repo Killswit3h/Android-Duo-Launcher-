@@ -4,11 +4,31 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Uninstall hand-off from the app context menu (FR-29). Normal permission: it only lets Duo
+         ask Android to show its own uninstall confirmation; Duo never removes anything itself. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Private space container in the App Library (FR-76..FR-78). Android grants this only to the
+         default Home app; without the role Duo reports the profile as unsupported and shows nothing. -->
+    <uses-permission android:name="android.permission.ACCESS_HIDDEN_PROFILES" />
+    <!-- Next 3 events in the Today View calendar widget (FR-59). Requested at the widget, not at
+         startup; without it the widget shows the date alone. Events are read on demand, never stored. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Contact results in Search (FR-72). Requested from Search settings, never at startup; the
+         section simply does not exist until granted. Contacts are queried per keystroke, never cached. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <queries>
         <package android:name="com.google.android.googlequicksearchbox" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Search's web hand-off and Ask control (FR-72, FR-73). Without these, package
+             visibility hides the handlers on API 30+ and both rows silently disappear. -->
+        <intent>
+            <action android:name="android.intent.action.WEB_SEARCH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VOICE_COMMAND" />
         </intent>
     </queries>
     <application android:label="Duo Launcher" android:icon="@drawable/ic_launcher"
@@ -23,6 +43,23 @@
         <activity android:name=".DiscoverFeedActivity" android:theme="@style/Theme.Duo.Discover" android:exported="false" android:resizeableActivity="true" />
         <activity android:name=".LiveDiscoverActivity" android:theme="@style/Theme.Duo.LiveDiscover"
             android:exported="false" android:resizeableActivity="true" />
+        <!--
+            Pin-request confirmation (FR-28). Exported because the system starts it, which is the
+            only caller that can produce a genuine request: the activity accepts nothing except a
+            LauncherApps.getPinItemRequest(intent) result and never executes a caller intent
+            (NFR-S6). Its own taskAffinity keeps it out of the Home task.
+        -->
+        <activity android:name=".shortcuts.PinItemActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Duo.PinItem"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.jake.duolauncher.pinitem">
+            <intent-filter>
+                <action android:name="android.content.pm.action.CONFIRM_PIN_SHORTCUT" />
+                <action android:name="android.content.pm.action.CONFIRM_PIN_APPWIDGET" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <service android:name=".DuneWallpaperService" android:label="Duo dunes"
             android:permission="android.permission.BIND_WALLPAPER" android:exported="true">
             <intent-filter><action android:name="android.service.wallpaper.WallpaperService" /></intent-filter>
@@ -38,6 +75,22 @@
             </intent-filter>
             <meta-data android:name="android.accessibilityservice"
                 android:resource="@xml/system_shade_accessibility_service" />
+        </service>
+        <!--
+            Notification badges (FR-20..FR-23). Opt-in and revocable from system Settings; the
+            launcher works fully without it. Exported only to the system, which is what
+            BIND_NOTIFICATION_LISTENER_SERVICE enforces (NFR-S6). The service reads the package,
+            user, channel badge flag, notification number and ongoing/summary flags, and persists
+            nothing (NFR-S3); android:allowBackup="false" above keeps badge state out of backups.
+        -->
+        <service android:name=".badges.DuoNotificationListener"
+            android:label="@string/badge_service_label"
+            android:description="@string/badge_service_description"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
         <activity android:name=".MainActivity" android:exported="true"
             android:launchMode="singleTask" android:resizeableActivity="true"

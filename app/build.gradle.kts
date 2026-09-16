@@ -80,6 +80,10 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    // Backdrop blur for the shared Liquid Glass layer. The 1.6.x line is the one built against
+    // Kotlin 2.1 and Compose 1.8; 1.7+ requires Kotlin 2.3 / Compose 1.12.
+    implementation("dev.chrisbanes.haze:haze:1.6.10")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.06.01"))

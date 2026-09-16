@@ -1,10 +1,12 @@
 # Third-party notices
 
-Duo Launcher source uses the MIT license in LICENSE. Dependencies retain their own licenses. The app includes this notice and the Apache 2.0 license text under `assets/licenses/`.
+Duo Launcher source uses the MIT license in LICENSE. Dependencies retain their own licenses. The app includes this notice, the Apache 2.0 license text, and the SIL Open Font License text under `assets/licenses/`.
 
 | Component family | Source | License |
 | --- | --- | --- |
 | AndroidX, Jetpack Compose, Material components and icons, Window | https://android.googlesource.com/platform/frameworks/support/ | Apache 2.0 |
+| Haze (Compose backdrop blur) | https://github.com/chrisbanes/haze | Apache 2.0 |
+| Inter typeface, bundled as `res/font/inter_variable.ttf` | https://github.com/rsms/inter | SIL Open Font License 1.1 |
 | Kotlin standard library | https://github.com/JetBrains/kotlin | Apache 2.0 |
 | Kotlin coroutines | https://github.com/Kotlin/kotlinx.coroutines | Apache 2.0 |
 | Kotlin serialization | https://github.com/Kotlin/kotlinx.serialization | Apache 2.0 |

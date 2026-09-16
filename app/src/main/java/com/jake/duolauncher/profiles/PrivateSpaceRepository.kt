@@ -43,6 +43,16 @@ sealed interface PrivateSpaceProbe {
     data class Unsupported(val reason: PrivateSpaceUnsupportedReason) : PrivateSpaceProbe
 
     data class Present(val userSerial: Long, val locked: Boolean) : PrivateSpaceProbe
+
+    /**
+     * The platform could not be read at all: a role check, profile enumeration or serial lookup
+     * failed.
+     *
+     * This is deliberately distinct from [Unsupported]. "There is no private profile" and "I cannot
+     * tell whether there is one" have opposite safe answers, and collapsing them into one value is
+     * what would let a transient binder failure reveal a locked space (FR-77).
+     */
+    data object Unreadable : PrivateSpaceProbe
 }
 
 /**
@@ -102,13 +112,35 @@ class DuoPrivateSpaceRepository(private val system: PrivateSpaceSystem) : Privat
     )
     override val state: StateFlow<PrivateSpaceState> = mutable.asStateFlow()
 
-    /** Non-null only while a private profile exists *and* is locked. */
+    /** Non-null while a private profile is locked, or while its state cannot be established. */
     @Volatile private var lockedPrivateSerial: Long? = null
+
+    /**
+     * The last serial positively identified as the private profile's.
+     *
+     * Kept so that losing *visibility* of the profile — Duo stops being Home, a binder call fails —
+     * can fail closed on the serial we already know rather than opening the gate (FR-77).
+     */
+    @Volatile private var lastKnownPrivateSerial: Long? = null
 
     /** The FR-77 predicate every other subsystem is wired to. */
     val gate: PrivateSpaceGate = PrivateSpaceGate { lockedPrivateSerial }
 
     private var observing = false
+
+    /**
+     * Notified after every state change.
+     *
+     * Surfaces that cache a projection of the gate — badges keep a per-app map — must recompute when
+     * the space locks, otherwise they keep rendering a stale answer until their own next event.
+     * Listeners are invoked without the repository's monitor being required by [gate], which reads a
+     * volatile field, so a listener may call straight back into the gate.
+     */
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addOnChanged(listener: () -> Unit) {
+        listeners += listener
+    }
 
     /** Reads the current state and starts reacting to lock changes made outside the launcher. */
     @Synchronized
@@ -127,28 +159,68 @@ class DuoPrivateSpaceRepository(private val system: PrivateSpaceSystem) : Privat
     @Synchronized
     fun refresh() {
         val next = when (val probe = system.probe()) {
-            is PrivateSpaceProbe.Unsupported -> {
-                lockedPrivateSerial = null
-                PrivateSpaceState.Unsupported(probe.reason)
+            is PrivateSpaceProbe.Unsupported -> unsupported(probe.reason)
+
+            // Nothing could be established. Anything already known to be private stays hidden.
+            PrivateSpaceProbe.Unreadable -> {
+                lockedPrivateSerial = lastKnownPrivateSerial
+                if (lastKnownPrivateSerial != null) {
+                    PrivateSpaceState.Locked
+                } else {
+                    PrivateSpaceState.Unsupported(PrivateSpaceUnsupportedReason.NO_PRIVATE_PROFILE)
+                }
             }
 
-            is PrivateSpaceProbe.Present -> if (probe.locked) {
-                // Set the serial before publishing so no collector can observe Locked while the
-                // gate still says the apps are visible.
-                lockedPrivateSerial = probe.userSerial
-                PrivateSpaceState.Locked
-            } else {
-                lockedPrivateSerial = null
-                PrivateSpaceState.Unlocked(system.appsFor(probe.userSerial))
+            is PrivateSpaceProbe.Present -> {
+                lastKnownPrivateSerial = probe.userSerial
+                if (probe.locked) {
+                    // Set the serial before publishing so no collector can observe Locked while the
+                    // gate still says the apps are visible.
+                    lockedPrivateSerial = probe.userSerial
+                    PrivateSpaceState.Locked
+                } else {
+                    // Read the list while the gate is still closed. A throwing seam must not be able
+                    // to leave the gate open, so the serial is only cleared once the list is in hand.
+                    val apps = runCatching { system.appsFor(probe.userSerial) }.getOrNull()
+                    if (apps == null) {
+                        lockedPrivateSerial = probe.userSerial
+                        PrivateSpaceState.Locked
+                    } else {
+                        lockedPrivateSerial = null
+                        PrivateSpaceState.Unlocked(apps)
+                    }
+                }
             }
         }
         mutable.value = next
+        listeners.forEach { listener -> runCatching { listener() } }
+    }
+
+    /**
+     * The gate's answer when the profile cannot be offered.
+     *
+     * Only a reason that means the profile genuinely is not there clears the gate. Losing the Home
+     * role does not delete the user's private space — it only stops Duo seeing it — and Duo stays
+     * reachable from its own launcher icon while that is true, so its apps must stay hidden.
+     */
+    private fun unsupported(reason: PrivateSpaceUnsupportedReason): PrivateSpaceState {
+        lockedPrivateSerial = when (reason) {
+            PrivateSpaceUnsupportedReason.NOT_DEFAULT_HOME -> lastKnownPrivateSerial
+            else -> {
+                lastKnownPrivateSerial = null
+                null
+            }
+        }
+        return PrivateSpaceState.Unsupported(reason)
     }
 
     override fun setLocked(locked: Boolean) {
         val serial = when (val probe = system.probe()) {
             is PrivateSpaceProbe.Present -> probe.userSerial
             is PrivateSpaceProbe.Unsupported -> return
+            // No serial could be established, so there is no profile to safely act on. Refusing
+            // leaves the gate closed rather than sending quiet-mode requests at a guessed user.
+            PrivateSpaceProbe.Unreadable -> return
         }
         // The broadcast normally drives the refresh; refreshing here too keeps the state correct on
         // devices that do not broadcast for a self-initiated change.
@@ -179,13 +251,17 @@ class AndroidPrivateSpaceSystem(context: Context) : PrivateSpaceSystem {
         }
         // Android grants ACCESS_HIDDEN_PROFILES to the default Home app only, so a launcher that is
         // not Home cannot see the profile at all and must say so rather than report "no profile".
-        if (!isDefaultHome()) {
+        // A role check that fails to answer is not the same as one that answers "no".
+        val home = isDefaultHome() ?: return PrivateSpaceProbe.Unreadable
+        if (!home) {
             return PrivateSpaceProbe.Unsupported(PrivateSpaceUnsupportedReason.NOT_DEFAULT_HOME)
         }
-        val user = privateProfile()
+        // A failed enumeration is unreadable; a successful one that finds nothing is "no profile".
+        val user = privateProfile().getOrElse { return PrivateSpaceProbe.Unreadable }
             ?: return PrivateSpaceProbe.Unsupported(PrivateSpaceUnsupportedReason.NO_PRIVATE_PROFILE)
         val serial = runCatching { userManager?.getSerialNumberForUser(user) }.getOrNull()
-            ?: return PrivateSpaceProbe.Unsupported(PrivateSpaceUnsupportedReason.NO_PRIVATE_PROFILE)
+            ?.takeIf { it >= 0 }
+            ?: return PrivateSpaceProbe.Unreadable
         // A profile that cannot be read is treated as locked: the safe direction for FR-77.
         val locked = runCatching { userManager?.isQuietModeEnabled(user) }.getOrNull() ?: true
         return PrivateSpaceProbe.Present(serial, locked)
@@ -231,25 +307,30 @@ class AndroidPrivateSpaceSystem(context: Context) : PrivateSpaceSystem {
         }.onSuccess { receiver = created }
     }
 
-    private fun isDefaultHome(): Boolean = runCatching {
+    /** null means the role could not be determined, which is not the same as not holding it. */
+    private fun isDefaultHome(): Boolean? = runCatching {
         appContext.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_HOME)
-    }.getOrNull() ?: false
+    }.getOrNull()
 
     /**
      * The private profile among the profiles this launcher can see, if any.
+     *
+     * Success carrying null means "enumerated the profiles, none of them is private"; a failure
+     * means the enumeration itself did not answer. [probe] maps those to opposite outcomes, so they
+     * are kept apart here rather than both becoming null.
      *
      * The API-35 guard is repeated here rather than relied on from [probe] so the version check is
      * local to the call, which is what keeps this off the code path — and out of lint's way — on
      * API 31–34.
      */
-    private fun privateProfile(): UserHandle? {
-        if (Build.VERSION.SDK_INT < PRIVATE_SPACE_SDK) return null
-        val apps = launcherApps ?: return null
+    private fun privateProfile(): Result<UserHandle?> {
+        if (Build.VERSION.SDK_INT < PRIVATE_SPACE_SDK) return Result.success(null)
+        val apps = launcherApps ?: return Result.failure(IllegalStateException("no LauncherApps"))
         return runCatching {
             apps.profiles.firstOrNull { user ->
                 apps.getLauncherUserInfo(user)?.userType == UserManager.USER_TYPE_PROFILE_PRIVATE
             }
-        }.getOrNull()
+        }
     }
 }
 

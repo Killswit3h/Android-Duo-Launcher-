@@ -104,6 +104,17 @@ class DuoBadgeRepository : BadgeRepository {
         publish()
     }
 
+    /**
+     * Re-projects the current counts through the catalog without any new notification arriving.
+     *
+     * The catalog's answer can change on its own — a private space locking is the case that matters
+     * (FR-77) — and the badges already on screen have to follow that immediately.
+     */
+    @Synchronized
+    fun republish() {
+        publish()
+    }
+
     override fun badgeForFolder(apps: List<ProfileAppId>): BadgeCount =
         BadgeRules.folderBadge(apps, mutableBadges.value)
 

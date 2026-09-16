@@ -31,8 +31,12 @@ private class FakePrivateSpaceSystem(
 
     override fun probe(): PrivateSpaceProbe = probe
 
+    /** Simulates the profile disappearing between the probe and the app query. */
+    var appsThrow = false
+
     override fun appsFor(userSerial: Long): List<PrivateSpaceApp> {
         appQueries++
+        if (appsThrow) throw IllegalStateException("profile went away")
         return apps
     }
 
@@ -231,6 +235,109 @@ class PrivateSpaceGateTest {
         assertTrue(isPrivateLockedApp(VAULT_ID, PRIVATE_SERIAL))
         assertFalse(isPrivateLockedApp(VAULT_ID, WORK_SERIAL))
         assertFalse(isPrivateLockedApp(VAULT_ID, null))
+    }
+}
+
+/**
+ * FR-77: losing sight of the profile must fail closed.
+ *
+ * "There is no private space" and "I cannot tell whether there is one" have opposite safe answers.
+ * Every case below is the second one, and in each the apps stay hidden.
+ */
+class PrivateSpaceFailClosedTest {
+
+    @Test fun anUnreadablePlatformKeepsAKnownPrivateAppHidden() {
+        val system = FakePrivateSpaceSystem(PrivateSpaceProbe.Present(PRIVATE_SERIAL, locked = true))
+        val repository = attached(system)
+        assertTrue(repository.gate.isHiddenWhileLocked(VAULT_ID))
+
+        // A binder call fails. The profile is still there; Duo simply cannot read it right now.
+        system.probe = PrivateSpaceProbe.Unreadable
+        repository.refresh()
+
+        assertEquals(PrivateSpaceState.Locked, repository.state.value)
+        assertTrue(repository.gate.isHiddenWhileLocked(VAULT_ID))
+    }
+
+    @Test fun anUnreadablePlatformHidesASpaceThatHadBeenUnlocked() {
+        val system = FakePrivateSpaceSystem(PrivateSpaceProbe.Present(PRIVATE_SERIAL, locked = false))
+        val repository = attached(system)
+        assertFalse(repository.gate.isHiddenWhileLocked(VAULT_ID))
+
+        system.probe = PrivateSpaceProbe.Unreadable
+        repository.refresh()
+
+        assertEquals(PrivateSpaceState.Locked, repository.state.value)
+        assertTrue(repository.gate.isHiddenWhileLocked(VAULT_ID))
+    }
+
+    /**
+     * The user switches to another launcher while the space is locked. Duo stays reachable from its
+     * own icon, so its App Library, Search and stored layout must not start listing private apps.
+     */
+    @Test fun losingTheHomeRoleWhileLockedKeepsPrivateAppsHidden() {
+        val system = FakePrivateSpaceSystem(PrivateSpaceProbe.Present(PRIVATE_SERIAL, locked = true))
+        val repository = attached(system)
+
+        system.probe = PrivateSpaceProbe.Unsupported(PrivateSpaceUnsupportedReason.NOT_DEFAULT_HOME)
+        repository.refresh()
+
+        // No container is offered, and the gate still hides the apps it already knows are private.
+        assertEquals(
+            PrivateSpaceState.Unsupported(PrivateSpaceUnsupportedReason.NOT_DEFAULT_HOME),
+            repository.state.value,
+        )
+        assertTrue(repository.gate.isHiddenWhileLocked(VAULT_ID))
+        assertTrue(repository.gate.isLockedProfile(PRIVATE_SERIAL))
+        // Personal and work apps are untouched by any of this.
+        assertFalse(repository.gate.isHiddenWhileLocked(PERSONAL_MAIL_ID))
+        assertFalse(repository.gate.isHiddenWhileLocked(WORK_MAIL_ID))
+    }
+
+    @Test fun anAppListThatCannotBeReadLeavesTheGateClosed() {
+        val system = FakePrivateSpaceSystem(PrivateSpaceProbe.Present(PRIVATE_SERIAL, locked = false))
+        system.appsThrow = true
+
+        val repository = attached(system)
+
+        assertEquals(PrivateSpaceState.Locked, repository.state.value)
+        assertTrue(repository.gate.isHiddenWhileLocked(VAULT_ID))
+    }
+
+    @Test fun anUnreadablePlatformWithNothingEverKnownHidesNothing() {
+        // No serial was ever established, so there is no id the gate could match on anyway.
+        val repository = attached(FakePrivateSpaceSystem(PrivateSpaceProbe.Unreadable))
+        assertFalse(repository.state.value.isAvailable)
+        assertFalse(repository.gate.isHiddenWhileLocked(VAULT_ID))
+    }
+}
+
+/** Surfaces that cache a projection of the gate — badges — must be told when it moves. */
+class PrivateSpaceChangeListenerTest {
+
+    @Test fun everyRefreshNotifiesListeners() {
+        val system = FakePrivateSpaceSystem(PrivateSpaceProbe.Present(PRIVATE_SERIAL, locked = false))
+        val repository = DuoPrivateSpaceRepository(system)
+        var notifications = 0
+        repository.addOnChanged { notifications++ }
+
+        repository.attach()
+        assertEquals(1, notifications)
+
+        // The user locks the space from system UI; badges have to drop at that moment.
+        system.broadcastLocked(true)
+        assertEquals(2, notifications)
+    }
+
+    @Test fun aThrowingListenerCannotBreakTheRefresh() {
+        val system = FakePrivateSpaceSystem(PrivateSpaceProbe.Present(PRIVATE_SERIAL, locked = true))
+        val repository = DuoPrivateSpaceRepository(system)
+        repository.addOnChanged { throw IllegalStateException("badges not wired yet") }
+
+        repository.attach()
+
+        assertEquals(PrivateSpaceState.Locked, repository.state.value)
+        assertTrue(repository.gate.isHiddenWhileLocked(VAULT_ID))
     }
 }
 

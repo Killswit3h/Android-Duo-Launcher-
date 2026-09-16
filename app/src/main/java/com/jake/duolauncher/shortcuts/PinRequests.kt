@@ -147,10 +147,24 @@ object DuoPinRequests {
     @Volatile
     var placer: PinnedItemPlacer? = null
 
-    /** A seam that throws must not decide a security question, so a failure reads as unlocked. */
-    fun isLayoutLocked(): Boolean = runCatching { layoutLock?.isLocked() }.getOrNull() ?: false
+    /**
+     * Whether **Lock Home layout** is on.
+     *
+     * An *unregistered* lock reads as unlocked: the setting does not exist yet, and there is nothing
+     * to enforce. A *registered* lock that throws reads as locked. A seam that cannot answer must
+     * not be the thing that lets an item be pinned past FR-49, and the two cases are different:
+     * absent means "no such setting", failing means "the setting exists and I could not read it".
+     */
+    fun isLayoutLocked(): Boolean {
+        val lock = layoutLock ?: return false
+        return runCatching { lock.isLocked() }.getOrDefault(true)
+    }
 
-    fun unlockLayout(): Boolean = runCatching { unlock?.let { it.unlock(); true } }.getOrNull() ?: false
+    /** True only when an unlock seam is registered and ran without throwing. */
+    fun unlockLayout(): Boolean {
+        val seam = unlock ?: return false
+        return runCatching { seam.unlock(); true }.getOrDefault(false)
+    }
 
     /** True when the item has a home, or when no placer is registered yet. */
     fun place(item: PinnedItem): Boolean =

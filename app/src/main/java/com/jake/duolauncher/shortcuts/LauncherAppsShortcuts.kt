@@ -1,6 +1,7 @@
 package com.jake.duolauncher.shortcuts
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.LauncherApps
 import android.content.pm.ShortcutInfo
@@ -208,6 +209,13 @@ object DuoUninstall {
     fun start(context: Context, packageName: String, userSerial: Long): Boolean {
         if (!canUninstall(context, packageName, userSerial)) return false
         val intent = UninstallAction.intentFor(packageName, userSerial) ?: return false
+        // Name the target profile explicitly. ACTION_DELETE resolves against the calling user, so
+        // without this a work- or private-profile icon uninstalls the personal copy of the package.
+        // A serial that cannot be resolved refuses the action rather than guessing a profile.
+        val user = runCatching {
+            context.getSystemService(UserManager::class.java)?.getUserForSerialNumber(userSerial)
+        }.getOrNull() ?: return false
+        intent.putExtra(Intent.EXTRA_USER, user)
         return runCatching { context.startActivity(intent); true }.getOrDefault(false)
     }
 

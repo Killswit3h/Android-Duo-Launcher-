@@ -109,12 +109,14 @@ class PinItemActivity : ComponentActivity() {
                         finish()
                     },
                     onUnlockAndAdd = {
-                        DuoPinRequests.unlockLayout()
-                        if (DuoPinRequests.isLayoutLocked()) {
-                            locked = true
-                        } else {
+                        // Only an unlock that actually ran may lead to a pin. Falling through to
+                        // accept() because a missing or throwing seam reported "not locked" would
+                        // place the item on a layout the user locked (FR-49).
+                        if (DuoPinRequests.unlockLayout() && !DuoPinRequests.isLayoutLocked()) {
                             accept()
                             finish()
+                        } else {
+                            locked = true
                         }
                     },
                     onCancel = { finish() },

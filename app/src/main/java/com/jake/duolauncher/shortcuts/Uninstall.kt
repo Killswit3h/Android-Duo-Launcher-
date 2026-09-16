@@ -53,8 +53,12 @@ object UninstallAction {
      * The intent for [packageName], or null when the package name is unusable.
      *
      * `Uri.fromParts` builds an opaque `package:` URI with no path, so a package name can never be
-     * read as a path or authority. [userSerial] is carried as a hint for the cross-profile case;
-     * the system ignores it when it does not apply.
+     * read as a path or authority.
+     *
+     * [userSerial] is recorded as Duo's own extra and is **not** what selects the profile: the
+     * platform uninstaller reads `Intent.EXTRA_USER`, which needs a real `UserHandle` and is
+     * therefore attached by [DuoUninstall.start]. Without it an uninstall started from a work- or
+     * private-profile icon would silently target the personal copy of the same package.
      */
     fun intentFor(packageName: String, userSerial: Long? = null): Intent? {
         if (!isUsablePackageName(packageName)) return null

@@ -105,15 +105,38 @@ class PinRequestGateTest {
         assertEquals(null, PinRequestGate.kindOf(null))
     }
 
-    @Test fun anUnregisteredLockReadsAsUnlockedAndAThrowingOneCannotBlockTheSheet() {
+    @Test fun anUnregisteredLockReadsAsUnlockedButAThrowingOneFailsSafe() {
         DuoPinRequests.reset()
+        // Nothing registered: the lock setting does not exist yet, so there is nothing to enforce.
         assertFalse(DuoPinRequests.isLayoutLocked())
 
+        // Registered but unable to answer. The setting exists, so the safe reading is "locked": a
+        // seam that cannot be read must not become the reason an item is pinned past FR-49.
         DuoPinRequests.layoutLock = HomeLayoutLock { throw IllegalStateException("settings not ready") }
-        assertFalse(DuoPinRequests.isLayoutLocked())
+        assertTrue(DuoPinRequests.isLayoutLocked())
 
         DuoPinRequests.layoutLock = HomeLayoutLock { true }
         assertTrue(DuoPinRequests.isLayoutLocked())
+        DuoPinRequests.layoutLock = HomeLayoutLock { false }
+        assertFalse(DuoPinRequests.isLayoutLocked())
+        DuoPinRequests.reset()
+    }
+
+    /**
+     * **Unlock and add** may only lead to a pin when an unlock genuinely happened. The activity
+     * gates `accept()` on this returning true, so an absent or throwing seam keeps the sheet locked.
+     */
+    @Test fun unlockOnlySucceedsWhenASeamActuallyRan() {
+        DuoPinRequests.reset()
+        assertFalse(DuoPinRequests.unlockLayout())
+
+        DuoPinRequests.unlock = HomeLayoutUnlock { throw IllegalStateException("settings not ready") }
+        assertFalse(DuoPinRequests.unlockLayout())
+
+        var unlocked = false
+        DuoPinRequests.unlock = HomeLayoutUnlock { unlocked = true }
+        assertTrue(DuoPinRequests.unlockLayout())
+        assertTrue(unlocked)
         DuoPinRequests.reset()
     }
 

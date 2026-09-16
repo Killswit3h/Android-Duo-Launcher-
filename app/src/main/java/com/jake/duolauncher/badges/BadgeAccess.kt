@@ -12,6 +12,7 @@ import android.os.Process
 import android.os.UserManager
 import android.provider.Settings
 import com.jake.duolauncher.profileAppId
+import com.jake.duolauncher.profiles.DuoPrivateSpace
 import java.util.concurrent.ConcurrentHashMap
 
 /** The Settings.Secure key listing every notification listener the user has enabled. */
@@ -97,7 +98,11 @@ internal class SecureSettingsAccess(private val context: Context) : Notification
  * app list through [DuoBadgeRepository.setCatalog] to also honor hidden apps and a locked private
  * space.
  */
-internal class LauncherAppsBadgeCatalog(context: Context) : BadgeAppCatalog {
+internal class LauncherAppsBadgeCatalog(
+    context: Context,
+    /** FR-77: true while [userSerial] names a private profile that is locked right now. */
+    private val isLockedProfile: (Long) -> Boolean = { false },
+) : BadgeAppCatalog {
     private val launcherApps = context.getSystemService(LauncherApps::class.java)
     private val userManager = context.getSystemService(UserManager::class.java)
     private val cache = ConcurrentHashMap<BadgeAppKey, List<ProfileAppId>>()
@@ -106,6 +111,10 @@ internal class LauncherAppsBadgeCatalog(context: Context) : BadgeAppCatalog {
     }
 
     override fun appIdsFor(packageName: String, userSerial: Long): List<ProfileAppId> {
+        // A locked private profile badges nothing (FR-77). This is checked ahead of the cache, so
+        // ids resolved while the space was unlocked cannot be replayed out of it once it locks, and
+        // a gate that cannot answer counts as locked.
+        if (runCatching { isLockedProfile(userSerial) }.getOrDefault(true)) return emptyList()
         val key = BadgeAppKey(packageName, userSerial)
         cache[key]?.let { return it }
         val user = runCatching { userManager?.getUserForSerialNumber(userSerial) }.getOrNull()
@@ -133,7 +142,15 @@ object DuoBadges {
         if (!wired) {
             wired = true
             val application = context.applicationContext
-            instance.setCatalog(LauncherAppsBadgeCatalog(application))
+            val privateSpace = DuoPrivateSpace.repository(application)
+            instance.setCatalog(
+                LauncherAppsBadgeCatalog(application) { serial ->
+                    privateSpace.gate.isLockedProfile(serial)
+                },
+            )
+            // Locking the space from system UI has to clear its badges at that moment, not at
+            // whatever time the next notification happens to arrive (FR-77).
+            privateSpace.addOnChanged { instance.republish() }
             instance.attach(SecureSettingsAccess(application))
         }
         return instance

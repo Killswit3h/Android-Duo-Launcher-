@@ -3,15 +3,21 @@ package com.jake.duolauncher
 import android.content.ComponentName
 import android.graphics.Bitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
+/**
+ * Backup v3 against the real platform types.
+ *
+ * The rules of the format are covered on the JVM by `LayoutBackupTest`. What only a device can
+ * check is what this test keeps: real [AppEntry] values carrying a `Bitmap` and a `ComponentName`,
+ * a real work profile identity, and the fact that what Duo writes is valid JSON to `org.json` —
+ * the parser every earlier version of this format was written with.
+ */
 @RunWith(AndroidJUnit4::class)
 class LeadingLayoutBackupIntegrationTest {
     private val icon = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
@@ -52,12 +58,18 @@ class LeadingLayoutBackupIntegrationTest {
             widgetPlacements = placements, widgetRestores = restores, loading = false)
     }
 
-    @Test fun version2RoundTripsMixedLeadingAppsFoldersWidgetsAndProfiles() {
+    @Test fun version3RoundTripsMixedLeadingAppsFoldersWidgetsAndProfiles() {
         val state = mixedState()
         val raw = encodeLayoutBackup(state, emptyList(), "same-scope")
+
+        // Still ordinary JSON, and still the document org.json reads.
         val json = JSONObject(raw)
-        assertEquals(2, json.getInt("version"))
-        assertEquals(HOME_CELLS, json.getJSONArray("leadingSlots").length())
+        assertEquals(LAYOUT_BACKUP_VERSION, json.getInt("version"))
+        val mirrored = json.getJSONObject("layoutSet").getJSONObject("mirrored")
+        assertEquals(4, mirrored.getJSONObject("grid").getInt("columns"))
+        assertEquals(6, mirrored.getJSONObject("grid").getInt("rows"))
+        // The leading workspace is written as its occupied cells, not as a fixed-length array.
+        assertEquals(2, mirrored.getJSONArray("leading").length())
 
         val preview = decodeLayoutBackup(raw, state.apps, profiles, "same-scope")
         assertEquals(state.leadingSlots, preview.layout.leadingSlots)
@@ -69,46 +81,16 @@ class LeadingLayoutBackupIntegrationTest {
         assertEquals(4, preview.appCount)
     }
 
-    @Test fun version1ImportsWithCanonicalEmptyLeadingPageAndVersion2RequiresIt() {
+    @Test fun workIdentityIsNotPlacedWhenTheBackupCameFromAnotherDevice() {
         val state = mixedState()
-        val old = JSONObject(encodeLayoutBackup(state.copy(leadingSlots = List(HOME_CELLS) { null },
-            folders = emptyList()), emptyList(), "scope"))
-            .put("version", 1).apply { remove("leadingSlots") }
-        val imported = decodeLayoutBackup(old.toString(), state.apps, profiles, "scope")
-        assertEquals(List<String?>(HOME_CELLS) { null }, imported.layout.leadingSlots)
+        val raw = encodeLayoutBackup(state, emptyList(), "origin-scope")
 
-        val missing = JSONObject(old.toString()).put("version", 2)
-        assertThrows(Exception::class.java) {
-            decodeLayoutBackup(missing.toString(), state.apps, profiles, "scope")
-        }
-        val short = JSONObject(encodeLayoutBackup(state, emptyList(), "scope"))
-            .put("leadingSlots", JSONArray().put(JSONObject.NULL))
-        assertThrows(Exception::class.java) {
-            decodeLayoutBackup(short.toString(), state.apps, profiles, "scope")
-        }
-    }
-
-    @Test fun rejectsDuplicateOrOrphanLeadingShortcutWidgetOverlapAndInvalidNegativePage() {
-        val state = mixedState()
-        fun base() = JSONObject(encodeLayoutBackup(state, emptyList(), "scope"))
-
-        val duplicate = base().also {
-            it.getJSONArray("leadingSlots").put(9, state.leadingSlots[8])
-        }
-        assertThrows(Exception::class.java) { decodeLayoutBackup(duplicate.toString(), state.apps, profiles, "scope") }
-
-        val orphan = base().also {
-            it.getJSONArray("leadingSlots").put(8, "folder:00000000-0000-0000-0000-000000000099")
-        }
-        assertThrows(Exception::class.java) { decodeLayoutBackup(orphan.toString(), state.apps, profiles, "scope") }
-
-        val overlap = base().also {
-            it.getJSONArray("leadingSlots").put(0, state.apps[0].id).put(8, JSONObject.NULL)
-        }
-        assertThrows(Exception::class.java) { decodeLayoutBackup(overlap.toString(), state.apps, profiles, "scope") }
-
-        val negativePage = base().also { it.getJSONArray("widgets").getJSONObject(0).put("page", -2) }
-        assertThrows(Exception::class.java) { decodeLayoutBackup(negativePage.toString(), state.apps, profiles, "scope") }
+        val foreign = decodeLayoutBackup(raw, state.apps, profiles, "destination-scope")
+        // The work app lives inside the folder, which collapses to its remaining personal member.
+        assertEquals(state.apps[1].id, foreign.layout.leadingSlots[20])
+        assertTrue(foreign.missingApps.any { it.contains(state.apps[2].id) })
+        // The work widget still needs an explicit decision before it can reconnect.
+        assertTrue(foreign.profileIssues.isNotEmpty())
     }
 
     @Test fun fullLeadingPageRoundTripsWithoutCreatingCoverPageSlots() {

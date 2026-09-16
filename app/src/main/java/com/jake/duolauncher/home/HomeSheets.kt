@@ -90,6 +90,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 import com.jake.duolauncher.*
+import com.jake.duolauncher.shortcuts.DuoUninstall
 
 /**
  * Hosts the string-keyed modal sheets ("dock", "pins", "settings", "widgetActions").
@@ -145,8 +146,34 @@ internal fun HomeSheetHost(
     var resizeConstraints by resizeConstraintsState
 
 
-    if (sheet.isNotEmpty() && sheet != "widgets") {
-        val activeCustomizationPage = if (sheet == "settings:wallpaper") CustomizationPage.WALLPAPER else customizationPage
+    // FR-79, FR-80: Duo Settings replaces the old customization sheet, and is full-screen rather
+    // than modal, so it is hosted beside the sheet the remaining destinations share.
+    if (sheet == "settings" || sheet == "settings:wallpaper") {
+        DuoSettingsOverlay(
+            state = state,
+            model = model,
+            activity = launcherActivity,
+            appearance = appearance,
+            isDefaultHome = isDefaultHome,
+            onClose = { customizationPage = CustomizationPage.OVERVIEW; sheet = "" },
+            onMakeDefault = { sheet = ""; onMakeDefault() },
+            onAddWidget = {
+                widgetSlot = model.nextWidgetSlot()
+                widgetTargetIndex = pager.currentPage.coerceIn(0, homePages - 1) * state.grid.cells
+                widgetPackage = null
+                widgetProfileSerial = null
+                widgetExactTarget = false
+                sheet = "widgets"
+            },
+            onShadeSetup = { sheet = ""; onShadeSetup() },
+            onWallpaperPreview = { sheet = ""; onWallpaperPreview() },
+            onLaunch = onLaunch,
+            onAppearanceMode = onAppearanceMode,
+            onAppearanceManual = onAppearanceManual,
+            onAppearanceDeviceLocation = onAppearanceDeviceLocation,
+            onAppearanceClear = onAppearanceClear,
+        )
+    } else if (sheet.isNotEmpty() && sheet != "widgets") {
         ModalBottomSheet(onDismissRequest = {
             customizationPage = CustomizationPage.OVERVIEW
             sheet = ""; widgetPackage = null; widgetExactTarget = false
@@ -154,14 +181,8 @@ internal fun HomeSheetHost(
             properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
             containerColor = MaterialTheme.colorScheme.surface) {
             ModalDialogBackHandler {
-                if ((sheet == "settings" || sheet == "settings:wallpaper") &&
-                    activeCustomizationPage != CustomizationPage.OVERVIEW) {
-                    customizationPage = CustomizationPage.OVERVIEW
-                    sheet = "settings"
-                } else {
-                    customizationPage = CustomizationPage.OVERVIEW
-                    sheet = ""; widgetPackage = null; widgetExactTarget = false
-                }
+                customizationPage = CustomizationPage.OVERVIEW
+                sheet = ""; widgetPackage = null; widgetExactTarget = false
             }
             when (sheet) {
                 "dock" -> AppPicker(state.apps, dockSlot,
@@ -178,32 +199,18 @@ internal fun HomeSheetHost(
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = { sheet = "" }) { Text("Done") }
                     }
-                    AppLibrary(state, pinQuery, { pinQuery = it }, onLaunch, model::setPinned,
-                        onActions = { selectedId = it.id; sheet = "" }, editing = true, modifier = Modifier.weight(1f).fillMaxWidth(),
-                        onTurnOnWork = { model.turnOnWork(it) })
+                    HostedAppLibrary(state, model, pinQuery, { pinQuery = it }, onLaunch,
+                        onActions = { selectedId = it.id; sheet = "" }, editing = true,
+                        modifier = Modifier.weight(1f).fillMaxWidth())
                 }
-                "settings", "settings:wallpaper" -> CustomizationSheet(state, wide, model, isDefaultHome,
-                    page = activeCustomizationPage, onPage = { customizationPage = it; sheet = "settings" },
-                    onMakeDefault = { sheet = ""; onMakeDefault() },
-                    onClose = { customizationPage = CustomizationPage.OVERVIEW; sheet = "" }, onEditPins = { sheet = "pins" },
-                    onWidget = { widgetSlot = it; widgetPackage = null; widgetProfileSerial = null; widgetExactTarget = false; sheet = "widgets" },
-                    onAddWidget = { page -> widgetSlot = model.nextWidgetSlot(); widgetTargetIndex = page * HOME_CELLS; widgetPackage = null; widgetProfileSerial = null; widgetExactTarget = false; sheet = "widgets" },
-                    onRemoveWidget = widgets::remove,
-                    onExportLayout = { sheet = ""; launcherActivity.backups.startExport() },
-                    onImportLayout = { sheet = ""; launcherActivity.backups.startImport() },
-                    appearance = appearance, onAppearanceMode = onAppearanceMode,
-                    onAppearanceManual = onAppearanceManual, onAppearanceDeviceLocation = onAppearanceDeviceLocation,
-                    onAppearanceClear = onAppearanceClear,
-                    onShadeSetup = { sheet = ""; onShadeSetup() },
-                    backgrounds = launcherActivity.backgrounds,
-                    onWallpaperPreview = { sheet = ""; onWallpaperPreview() }, homePage = pager.currentPage.coerceIn(0, homePages - 1))
                 "widgetActions" -> model.placement(widgetSlot)?.let { placement ->
+                    val grid = state.grid
                     val topPitch = (geometry.widgetHeight + 18f) / 2f
-                    val gridSizing = WidgetGridSizing(GRID_COLUMNS, GRID_ROWS, geometry.gridWidth / GRID_COLUMNS,
+                    val gridSizing = WidgetGridSizing(grid.columns, grid.rows, geometry.gridWidth / grid.columns,
                         minOf(topPitch, geometry.rowHeight), maxOf(topPitch, geometry.rowHeight), 10f, 18f,
                         topRowHeightDp = topPitch, appRowHeightDp = geometry.rowHeight)
                     val constraints = widgets.manager.getAppWidgetInfo(placement.id)?.let { widgets.sizing(it, gridSizing) }
-                    WidgetActions(placement, constraints,
+                    WidgetActions(placement, constraints, grid = grid,
                         canConfigure = widgets.canReconfigure(placement.id),
                         onConfigure = { widgets.reconfigure(placement.id); sheet = "" },
                         isValid = { x, y -> (x == placement.spanX && y == placement.spanY) || resizeWidget(state.layout, widgetSlot, x, y) != state.layout },
@@ -213,10 +220,10 @@ internal fun HomeSheetHost(
                             resizeConstraints = constraints; sheet = ""
                         },
                         onMoveToPage = { page ->
-                            (0 until HOME_CELLS).firstOrNull { local ->
-                                widgetCandidate(state.layout, placement.slot, page * HOME_CELLS + local,
+                            (0 until grid.cells).firstOrNull { local ->
+                                widgetCandidate(state.layout, placement.slot, page * grid.cells + local,
                                     placement.spanX, placement.spanY) != null
-                            }?.let { model.moveWidgetTo(placement.slot, page * HOME_CELLS + it) } == true
+                            }?.let { model.moveWidgetTo(placement.slot, page * grid.cells + it) } == true
                         }, homePages = homePages,
                         onReplace = {
                             widgetPackage = null
@@ -241,6 +248,20 @@ internal fun FirstRunSheetHost(
     model: LauncherModel,
     pager: LauncherPager,
     homePages: Int,
+    /** FR-31: the first widget lands on the active layout's grid, not a fixed 4x6. */
+    grid: GridSpec = DEFAULT_GRID,
+    /**
+     * FR-81's **Choose look** step. The sheet owns no storage, so its three selections are written
+     * straight through to the settings store; without these the step rendered and changed nothing.
+     */
+    settings: DuoSettings = DuoSettings(),
+    appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
+    onAppearanceMode: (AppearanceMode) -> Unit = {},
+    /**
+     * Routes the Gestures step through the activity's own shade setup, which keeps the Discover
+     * ownership token held across the trip to Android's Accessibility settings.
+     */
+    onOpenShadeAccess: (() -> Unit)? = null,
     onMakeDefault: () -> Unit,
     onFinishFirstRun: () -> Unit,
     sheetState: MutableState<String>,
@@ -271,7 +292,7 @@ internal fun FirstRunSheetHost(
                 onAddWidget = {
                     onFinishFirstRun()
                     widgetSlot = model.nextWidgetSlot()
-                    widgetTargetIndex = pager.currentPage.coerceIn(0, homePages - 1) * HOME_CELLS
+                    widgetTargetIndex = pager.currentPage.coerceIn(0, homePages - 1) * grid.cells
                     widgetPackage = null
                     widgetProfileSerial = null
                     widgetExactTarget = false
@@ -279,6 +300,13 @@ internal fun FirstRunSheetHost(
                 },
                 onExplore = onFinishFirstRun,
                 onSkip = onFinishFirstRun,
+                appearanceMode = appearanceMode,
+                onAppearanceMode = onAppearanceMode,
+                glassLevel = settings.glassLevel,
+                onGlassLevel = model::setGlass,
+                iconAppearance = settings.iconAppearance,
+                onIconAppearance = model::setIconAppearance,
+                onOpenShadeAccess = onOpenShadeAccess,
             )
         }
     }
@@ -298,6 +326,9 @@ internal fun HomeDialogs(
     homePages: Int,
     lastHomePage: Int,
     expandedWorkspace: Boolean,
+    isDefaultHome: Boolean,
+    onMakeDefault: () -> Unit,
+    iconSize: Float,
     onAppInfo: (AppEntry) -> Unit,
     onLaunchFrom: (AppEntry, android.graphics.Rect?) -> Unit,
     leaveTemporaryWidgetPage: () -> Unit,
@@ -326,31 +357,64 @@ internal fun HomeDialogs(
     var openFolderId by openFolderIdState
 
 
+// FR-24: a long-press that is released opens the glass context menu anchored to the icon, in place
+// of the old bottom sheet. Long-press-and-drag is unaffected: `finishDrag` only sets `selectedId`
+// when the gesture ended without movement, so a real pickup never reaches here.
 appsById[selectedId]?.let { app ->
+    val context = LocalContext.current
     val pinned = state.layout.indexOfShortcut(app.id) != null
     val packageName = app.packageName
     val hasWidgets = packageName.isNotEmpty() && runCatching {
         widgets.providersForPackage(packageName, app.user)
     }.getOrDefault(emptyList()).isNotEmpty()
-    ModalBottomSheet(onDismissRequest = { appMoveMenu = false; selectedId = null },
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false)) {
-        LauncherAppActionSheet(app, pinned, homePages, appMoveMenu, { appMoveMenu = it },
-            onAddOrRemove = { model.setPinned(app.id, !pinned); selectedId = null },
-            onMoveFirst = { model.move(app.id, -maxOf(HOME_CELLS, state.homeSlots.size)); selectedId = null },
-            onMoveEarlier = { model.move(app.id, -1); selectedId = null },
-            onMoveLater = { model.move(app.id, 1); selectedId = null },
-            onMovePage = { page -> model.applyDrop(app.id, DropTarget.Home(homeCellIndex(page, 0))); selectedId = null },
-            onInfo = { onAppInfo(app); selectedId = null },
-            onWidgets = if (hasWidgets) {{
-                val page = lastHomePage.coerceIn(0, homePages - 1)
-                widgetTargetIndex = homeCellIndex(page, 0); widgetExactTarget = false
-                widgetSlot = model.nextWidgetSlot(); widgetPackage = packageName
-                widgetProfileSerial = app.userSerial; selectedId = null; sheet = "widgets"
-            }} else null,
-            onCreateFolder = { createFolderFirstId = app.id; selectedId = null },
-            onClose = { appMoveMenu = false; selectedId = null })
+    // FR-29: a system app or Duo itself never shows Uninstall. The answer needs the package
+    // manager, so it is resolved off the main thread once per menu rather than during a scroll.
+    val canUninstall by produceState(false, app.id) {
+        value = withContext(Dispatchers.IO) {
+            DuoUninstall.canUninstall(context, packageName, app.userSerial)
+        }
     }
+    // The drag layer already knows every icon's bounds, so the menu anchors without new plumbing.
+    val anchor = drag.regions.values.firstOrNull { it.appId == app.id }?.bounds
+    HomeContextMenu(
+        app = app,
+        anchor = anchor,
+        iconSize = iconSize,
+        isDefaultHome = isDefaultHome,
+        capabilities = ContextMenuCapabilities(
+            placed = pinned,
+            canEditHome = true,
+            // Edit icon (FR-19) and Hide app (FR-75) land with the icon-override and schema-9
+            // tasks; until their model calls exist the rows are not offered rather than faked.
+            canEditIcon = false,
+            canCreateFolder = true,
+            hasWidgets = hasWidgets,
+            canHide = false,
+            canUninstall = canUninstall,
+        ),
+        onDismiss = { appMoveMenu = false; selectedId = null },
+        onMakeDefault = onMakeDefault,
+        onAction = { action ->
+            when (action) {
+                ContextMenuAction.EDIT_HOME -> { selectedId = null; sheet = "settings" }
+                ContextMenuAction.APP_INFO -> { onAppInfo(app); selectedId = null }
+                ContextMenuAction.CREATE_FOLDER -> { createFolderFirstId = app.id; selectedId = null }
+                ContextMenuAction.WIDGETS -> {
+                    val page = lastHomePage.coerceIn(0, homePages - 1)
+                    widgetTargetIndex = homeCellIndex(page, 0); widgetExactTarget = false
+                    widgetSlot = model.nextWidgetSlot(); widgetPackage = packageName
+                    widgetProfileSerial = app.userSerial; selectedId = null; sheet = "widgets"
+                }
+                ContextMenuAction.ADD_TO_HOME, ContextMenuAction.REMOVE_FROM_HOME -> {
+                    model.setPinned(app.id, !pinned); selectedId = null
+                }
+                ContextMenuAction.UNINSTALL -> {
+                    DuoUninstall.start(context, packageName, app.userSerial); selectedId = null
+                }
+                ContextMenuAction.EDIT_ICON, ContextMenuAction.HIDE_APP -> selectedId = null
+            }
+        },
+    )
 }
 emptyCellIndex?.let { index ->
     ModalBottomSheet(onDismissRequest = { emptyCellIndex = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -369,8 +433,8 @@ createFolderFirstId?.let { firstId ->
                 TextButton(onClick = {
                     val preferredPage = state.layout.indexOfShortcut(firstId)?.let(::homeCellPage)
                         ?.takeIf { it >= 0 || expandedWorkspace } ?: lastHomePage.coerceIn(0, homePages - 1)
-                    val blocked = state.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices() }
-                    val targetIndex = (0 until HOME_CELLS).map { homeCellIndex(preferredPage, it) }
+                    val blocked = state.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices(state.grid) }
+                    val targetIndex = (0 until state.grid.cells).map { homeCellIndex(preferredPage, it, state.grid) }
                         .firstOrNull { it !in blocked && state.layout.slotAt(it) in listOf(null, firstId, second.id) }
                     if (targetIndex != null) model.createFolder(firstId, second.id, targetIndex)
                     createFolderFirstId = null
@@ -382,19 +446,24 @@ createFolderFirstId?.let { firstId ->
 }
 openFolderId?.let { id ->
     state.folders.firstOrNull { it.id == id }?.let { folder ->
-        val blocked = state.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices() }
+        val blocked = state.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices(state.grid) }
         val destinationPages = (if (expandedWorkspace) listOf(-1) else emptyList()) + (0 until homePages)
         val homeDestinations = destinationPages.mapNotNull { destinationPage ->
-            (0 until HOME_CELLS).map { homeCellIndex(destinationPage, it) }
+            (0 until state.grid.cells).map { homeCellIndex(destinationPage, it, state.grid) }
                 .firstOrNull { it !in blocked && state.layout.slotAt(it) == null }
         }
-        FolderPanel(folder, appsById, drag, pager.currentPage, homeDestinations,
-            dockVacancies = state.dock.indices.filter { state.dock[it] == null },
-            onDismiss = { openFolderId = null }, onRename = { model.renameFolder(id, it) },
-            onLaunch = onLaunchFrom,
-            onMoveOut = { appId, destination ->
-                if (model.removeAppFromFolder(id, appId, destination)) openFolderId = model.folder(id)?.id
-            })
+        // FR-42: while the device is half-opened the folder panel opens beside the fold, not across
+        // it. The clearance is applied here rather than inside FolderPanel so the panel keeps its
+        // own centring and only ever sees the space it is allowed to use.
+        Box(Modifier.fillMaxSize().hingeClearance()) {
+            FolderPanel(folder, appsById, drag, pager.currentPage, homeDestinations,
+                dockVacancies = state.dock.indices.filter { state.dock[it] == null },
+                onDismiss = { openFolderId = null }, onRename = { model.renameFolder(id, it) },
+                onLaunch = onLaunchFrom,
+                onMoveOut = { appId, destination ->
+                    if (model.removeAppFromFolder(id, appId, destination)) openFolderId = model.folder(id)?.id
+                })
+        }
     } ?: LaunchedEffect(id) { openFolderId = null }
 }
 launcherActivity.backups.preview?.let { preview ->

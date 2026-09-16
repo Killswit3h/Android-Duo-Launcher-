@@ -2,18 +2,11 @@
 
 package com.jake.duolauncher.home
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateIntOffsetAsState
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -21,60 +14,59 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.jake.duolauncher.AppEntry
+import com.jake.duolauncher.DEFAULT_GRID
 import com.jake.duolauncher.DropTarget
 import com.jake.duolauncher.FolderEntry
-import com.jake.duolauncher.GRID_COLUMNS
-import com.jake.duolauncher.GRID_ROWS
-import com.jake.duolauncher.Glass
-import com.jake.duolauncher.HOME_CELLS
+import com.jake.duolauncher.GridSpec
 import com.jake.duolauncher.HomeDragState
 import com.jake.duolauncher.HomeGeometry
-import com.jake.duolauncher.Ink
 import com.jake.duolauncher.WidgetController
 import com.jake.duolauncher.WidgetPlacement
+import com.jake.duolauncher.design.DuoTokens
+import com.jake.duolauncher.design.GlassLevel
+import com.jake.duolauncher.design.GlassSurface
+import com.jake.duolauncher.design.currentDuoColors
 import com.jake.duolauncher.dropRegion
 import com.jake.duolauncher.homeCellIndex
 import com.jake.duolauncher.homeCellLocal
-import com.jake.duolauncher.toAndroidBounds
 import kotlin.math.roundToInt
 
+/**
+ * One Home page's grid (FR-31, FR-42).
+ *
+ * The grid is whatever [grid] says — 4 to 8 columns by 4 to 8 rows, per layout — rather than the
+ * 4x6 this used to hard-code. Everything that addresses a cell goes through [grid], so a page on the
+ * inner display and a page on the cover can be different shapes at the same time.
+ *
+ * While the device is half-opened with a vertical fold, the columns open a gutter at the boundary
+ * nearest the hinge (see [hingeColumnGutter]) instead of being redistributed: the icons stay in the
+ * order the user put them in, and no cell ends up under the fold.
+ */
 @Composable
 internal fun SharedHomeGrid(
     page: Int,
@@ -85,26 +77,35 @@ internal fun SharedHomeGrid(
     widgetPlacements: List<WidgetPlacement>,
     appsById: Map<String, AppEntry>,
     geometry: HomeGeometry,
-    labels: Boolean,
     widgets: WidgetController,
     drag: HomeDragState,
     target: DropTarget?,
     folders: List<FolderEntry>,
+    grid: GridSpec = DEFAULT_GRID,
+    /** FR-45: Edit mode jiggles every placement and shows its − badge. */
+    editing: Boolean = false,
+    /** FR-46: removes an app, shortcut or folder from Home. Null hides the − badges. */
+    onRemoveItem: ((String) -> Unit)? = null,
+    /** FR-46: removes a widget, after the caller has confirmed releasing its binding. */
+    onRemoveWidget: ((Int) -> Unit)? = null,
     onLaunch: (AppEntry, android.graphics.Rect?) -> Unit,
     onActions: (AppEntry) -> Unit,
     onWidget: (Int) -> Unit,
     onFolder: (String) -> Unit,
     onEmptyWidget: (Int) -> Unit,
 ) {
+    val colors = currentDuoColors()
     val rowHeight = geometry.rowHeight
     val iconSize = geometry.iconSize
-    val pageStart = homeCellIndex(page, 0)
-    val pageRange = pageStart until pageStart + HOME_CELLS
-    fun savedAt(index: Int) = if (page == -1) savedLeadingSlots.getOrNull(homeCellLocal(index)) else savedSlots.getOrNull(index)
-    fun previewAt(index: Int) = if (page == -1) previewLeadingSlots.getOrNull(homeCellLocal(index)) else previewSlots.getOrNull(index)
-    fun savedIndexOf(id: String) = if (page == -1) savedLeadingSlots.indexOf(id).takeIf { it >= 0 }?.let { homeCellIndex(-1, it) }
+    val cells = grid.cells
+    val columns = grid.columns
+    val pageStart = homeCellIndex(page, 0, grid)
+    val pageRange = pageStart until pageStart + cells
+    fun savedAt(index: Int) = if (page == -1) savedLeadingSlots.getOrNull(homeCellLocal(index, grid)) else savedSlots.getOrNull(index)
+    fun previewAt(index: Int) = if (page == -1) previewLeadingSlots.getOrNull(homeCellLocal(index, grid)) else previewSlots.getOrNull(index)
+    fun savedIndexOf(id: String) = if (page == -1) savedLeadingSlots.indexOf(id).takeIf { it >= 0 }?.let { homeCellIndex(-1, it, grid) }
         else savedSlots.indexOf(id).takeIf { it >= 0 }
-    fun previewIndexOf(id: String) = if (page == -1) previewLeadingSlots.indexOf(id).takeIf { it >= 0 }?.let { homeCellIndex(-1, it) }
+    fun previewIndexOf(id: String) = if (page == -1) previewLeadingSlots.indexOf(id).takeIf { it >= 0 }?.let { homeCellIndex(-1, it, grid) }
         else previewSlots.indexOf(id).takeIf { it >= 0 }
     val draggedId = drag.source?.appId
     val homeTarget = (target as? DropTarget.Home)?.index
@@ -120,16 +121,31 @@ internal fun SharedHomeGrid(
     val pending = widgets.pendingPlacement?.takeIf { it.page == page }
     val pendingIsReplacement = pending != null && widgetPlacements.any { it.slot == pending.slot }
     val pageWidgets = widgetPlacements.filter { it.page == page } + listOfNotNull(pending?.takeUnless { pendingIsReplacement })
-    val renderedRows = maxOf(GRID_ROWS, pageWidgets.maxOfOrNull { it.row + it.spanY } ?: GRID_ROWS)
-    val topPitch = (geometry.widgetHeight + 18f) / 2f
-    fun rowTop(row: Int) = if (row <= 2) row * topPitch else geometry.widgetHeight + 18f + (row - 2) * rowHeight
-    BoxWithConstraints(Modifier.fillMaxWidth().height(rowTop(renderedRows).dp)) {
-        val density = LocalDensity.current
-        val cellWidth = maxWidth / 4
-        val cellWidthPx = with(density) { cellWidth.toPx() }
-        val rowHeightPx = with(density) { rowHeight.dp.toPx() }
+    val renderedRows = maxOf(grid.rows, pageWidgets.maxOfOrNull { it.row + it.spanY } ?: grid.rows)
+    val topPitch = (geometry.widgetHeight + WIDGET_BAND_GAP) / WIDGET_BAND_ROWS
+    fun rowTop(row: Int) = if (row <= WIDGET_BAND_ROWS) row * topPitch
+        else geometry.widgetHeight + WIDGET_BAND_GAP + (row - WIDGET_BAND_ROWS) * rowHeight
 
-        repeat(HOME_CELLS) { localIndex ->
+    // FR-42: the fold, rebased onto this grid's own left edge. Measured rather than passed in, so
+    // every caller of the grid gets the behaviour without having to plumb window coordinates.
+    val hinge = LocalHomeHinge.current
+    var gridLeftInWindow by remember { mutableFloatStateOf(0f) }
+
+    BoxWithConstraints(
+        Modifier.fillMaxWidth().height(rowTop(renderedRows).dp)
+            .onGloballyPositioned { gridLeftInWindow = it.boundsInWindow().left },
+    ) {
+        val density = LocalDensity.current
+        val widthPx = with(density) { maxWidth.toPx() }
+        val gutter = remember(hinge, gridLeftInWindow, widthPx, columns) {
+            hingeColumnGutter(gridLeftInWindow, widthPx, columns, hinge)
+        }
+        val cellWidthPx = gutter?.cellWidthPx ?: (widthPx / columns)
+        val cellWidth = with(density) { cellWidthPx.toDp() }
+        fun columnLeftPx(column: Int) = gutter?.columnLeftPx(column) ?: (column * cellWidthPx)
+        fun columnLeft(column: Int) = with(density) { columnLeftPx(column).toDp() }
+
+        repeat(cells) { localIndex ->
             val globalIndex = pageStart + localIndex
             val cell = DropTarget.Home(globalIndex)
             val savedId = savedAt(globalIndex)
@@ -138,21 +154,22 @@ internal fun SharedHomeGrid(
             val previewId = previewAt(globalIndex)
             val highlighted = drag.active && target == cell
             val gap = hiddenIndex == globalIndex
-            val row = localIndex / GRID_COLUMNS
+            val row = localIndex / columns
             val cellHeight = rowTop(row + 1) - rowTop(row)
-            Box(Modifier.offset(x = cellWidth * (localIndex % GRID_COLUMNS), y = rowTop(row).dp)
+            Box(Modifier.offset(x = columnLeft(localIndex % columns), y = rowTop(row).dp)
                 .width(cellWidth).height(cellHeight.dp).testTag("home-cell-$globalIndex")
                 .dropRegion(drag, cell, savedApp?.id ?: savedFolder?.id, page)
                 .combinedClickable(onClick = { savedFolder?.let { onFolder(it.id) } },
                     onLongClick = { if (savedId == null && !drag.active) onEmptyWidget(globalIndex) })
-                .background(if (highlighted) Glass.copy(alpha = .25f) else Color.Transparent, RoundedCornerShape(16.dp))
+                .background(if (highlighted) colors.glassTint.copy(alpha = DROP_FILL) else Color.Transparent,
+                    DuoTokens.radius.tile)
                 .border(if (highlighted) 2.dp else 0.dp,
-                    if (highlighted) Color.White.copy(alpha = .8f) else Color.Transparent, RoundedCornerShape(16.dp)),
+                    if (highlighted) colors.specular.copy(alpha = DROP_EDGE) else Color.Transparent,
+                    DuoTokens.radius.tile),
                 contentAlignment = Alignment.TopCenter) {
-                if (drag.active && drag.source?.appId != null && (gap || previewId == null)) Box(
-                    Modifier.size(iconSize.dp).testTag(if (gap) "drag-gap-home-$globalIndex" else "empty-home-slot-$globalIndex")
-                        .background(Glass.copy(alpha = if (gap) .16f else .08f), RoundedCornerShape(18.dp))
-                        .border(if (gap) 2.dp else 1.dp, Color.White.copy(alpha = if (gap) .55f else .3f), RoundedCornerShape(18.dp)))
+                if (drag.active && drag.source?.appId != null && (gap || previewId == null)) SlotPlaceholder(
+                    size = iconSize, emphasized = gap,
+                    modifier = Modifier.testTag(if (gap) "drag-gap-home-$globalIndex" else "empty-home-slot-$globalIndex"))
             }
         }
 
@@ -165,9 +182,10 @@ internal fun SharedHomeGrid(
             val app = appsById[id] ?: return@forEach
             key(id) {
                 val localIndex = renderIndex - pageStart
-                val row = localIndex / GRID_COLUMNS
+                val row = localIndex / columns
                 val animatedOffset by animateIntOffsetAsState(
-                    IntOffset(((localIndex % GRID_COLUMNS) * cellWidthPx).roundToInt(), with(density) { rowTop(row).dp.toPx() }.roundToInt()),
+                    IntOffset(columnLeftPx(localIndex % columns).roundToInt(),
+                        with(density) { rowTop(row).dp.toPx() }.roundToInt()),
                     label = "home insertion $id",
                 )
                 val visible = previewIndex in pageRange && renderIndex != hiddenIndex
@@ -177,7 +195,9 @@ internal fun SharedHomeGrid(
                 )
                 Box(Modifier.offset { animatedOffset }.width(cellWidth).height(rowHeight.dp)
                     .alpha(opacity).testTag("home-app-$id"), contentAlignment = Alignment.TopCenter) {
-                    if (visible) AppTile(app, iconSize, labels,
+                    if (visible) AppTile(app, iconSize,
+                        editing = editing,
+                        onRemove = onRemoveItem?.let { remove -> { remove(id) } },
                         onClick = { onLaunch(app, it) }, onLongClick = { onActions(app) })
                 }
             }
@@ -187,31 +207,49 @@ internal fun SharedHomeGrid(
             val previewIndex = previewIndexOf(folder.id) ?: -1
             val renderIndex = previewIndex.takeIf { it in pageRange } ?: savedIndex.takeIf { it in pageRange } ?: return@forEach
             val localIndex = renderIndex - pageStart
-            val row = localIndex / GRID_COLUMNS
-            val x = cellWidth * (localIndex % GRID_COLUMNS)
+            val row = localIndex / columns
+            val x = columnLeft(localIndex % columns)
             val y = rowTop(row).dp
-            FolderTile(folder, appsById, iconSize, labels, drag, page,
+            FolderTile(folder, appsById, iconSize, drag, page,
                 Modifier.offset(x = x, y = y).width(cellWidth).height(rowHeight.dp)
-                    .testTag("home-folder-${folder.id}"), onClick = { onFolder(folder.id) })
+                    .testTag("home-folder-${folder.id}"),
+                editing = editing,
+                onRemove = onRemoveItem?.let { remove -> { remove(folder.id) } },
+                onClick = { onFolder(folder.id) })
         }
         pageWidgets.forEach { placement ->
             key("widget-${placement.slot}") {
-                val x = cellWidth * placement.column + 5.dp
-                val width = (cellWidth * placement.spanX - 10.dp).coerceAtLeast(1.dp)
+                val x = columnLeft(placement.column) + WIDGET_INSET
+                // Spanning across the fold gutter keeps the widget's own edges on the grid lines,
+                // so a widget either sits beside the fold or bridges it deliberately.
+                val spanWidthPx = columnLeftPx(placement.column + placement.spanX) - columnLeftPx(placement.column)
+                val width = (with(density) { spanWidthPx.toDp() } - WIDGET_INSET * 2).coerceAtLeast(1.dp)
                 val y = rowTop(placement.row)
-                val height = (rowTop(placement.row + placement.spanY) - y - 18f).coerceAtLeast(48f)
-                if (placement == pending) Surface(Modifier.offset(x = x, y = y.dp).width(width).height(height.dp)
-                    .testTag("widget-pending-${placement.slot}").semantics(mergeDescendants = true) {
-                        contentDescription = "Pending ${widgets.pendingProvider?.shortClassName ?: "widget"}"
-                    }, color = Glass.copy(alpha = .72f),
-                    shape = RoundedCornerShape(24.dp), border = androidx.compose.foundation.BorderStroke(2.dp, Color.White)) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.Center,
+                val height = (rowTop(placement.row + placement.spanY) - y - WIDGET_BAND_GAP).coerceAtLeast(48f)
+                if (placement == pending) GlassSurface(
+                    level = GlassLevel.WIDGET, shape = DuoTokens.radius.widget,
+                    modifier = Modifier.offset(x = x, y = y.dp).width(width).height(height.dp)
+                        .testTag("widget-pending-${placement.slot}").semantics(mergeDescendants = true) {
+                            contentDescription = "Pending ${widgets.pendingProvider?.shortClassName ?: "widget"}"
+                        }) {
+                    Column(Modifier.padding(DuoTokens.space.md), verticalArrangement = Arrangement.Center,
                         horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                        Spacer(Modifier.height(8.dp)); Text("Finish widget setup", color = Ink)
+                        Spacer(Modifier.height(DuoTokens.space.sm))
+                        Text("Finish widget setup", style = DuoTokens.type.footnote, color = colors.label1)
                     }
-                } else MovableWidget(placement.id, placement.slot, widgets, drag, target,
-                    Modifier.offset(x = x, y = y.dp).width(width).height(height.dp), page = page) { onWidget(placement.slot) }
+                } else Box(Modifier.offset(x = x, y = y.dp).width(width).height(height.dp)) {
+                    MovableWidget(placement.id, placement.slot, widgets, drag, target,
+                        Modifier.jiggle(editing, "widget-${placement.slot}"), page = page) { onWidget(placement.slot) }
+                    if (editing && onRemoveWidget != null) {
+                        RemoveBadge(
+                            kind = RemovableKind.WIDGET,
+                            label = remember(placement.id, widgets) { widgetLabel(placement.id, widgets) },
+                            tag = "remove-widget-${placement.slot}",
+                            onRemove = { onRemoveWidget(placement.slot) },
+                        )
+                    }
+                }
             }
         }
     }
@@ -220,45 +258,9 @@ internal fun SharedHomeGrid(
 internal fun <T> List<T>.slicePage(range: IntRange): List<T> =
     if (isEmpty() || range.first >= size) emptyList() else subList(range.first, minOf(range.last + 1, size))
 
-@Composable
-internal fun FolderTile(folder: FolderEntry, apps: Map<String, AppEntry>, size: Float, labels: Boolean,
-    drag: HomeDragState, page: Int, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Column(modifier.clickable(onClick = onClick).semantics(mergeDescendants = true) {
-        contentDescription = "Folder ${folder.title}, ${folder.appIds.size} apps"
-    }, horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.size(size.dp).clip(RoundedCornerShape((size * .24f).dp))
-            .background(Glass.copy(alpha = .72f)).border(1.dp, Color.White.copy(alpha = .55f), RoundedCornerShape((size * .24f).dp))
-            .dropRegion(drag, DropTarget.Folder(folder.id), page = page, folderId = folder.id)
-            .testTag("folder-drop-${folder.id}")) {
-            folder.appIds.take(4).forEachIndexed { index, id ->
-                apps[id]?.let { app ->
-                    Image(app.icon.asImageBitmap(), null, Modifier.align(when (index) {
-                        0 -> Alignment.TopStart; 1 -> Alignment.TopEnd; 2 -> Alignment.BottomStart; else -> Alignment.BottomEnd
-                    }).padding(5.dp).size((size * .38f).dp).clip(RoundedCornerShape(6.dp)))
-                }
-            }
-        }
-        if (labels) Text(folder.title, color = Color.White, fontSize = 11.sp, maxLines = 1,
-            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
-    }
-}
-
-@Composable
-internal fun AppTile(app: AppEntry, size: Float, labels: Boolean, modifier: Modifier = Modifier, onClick: (android.graphics.Rect) -> Unit, onLongClick: () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) .92f else 1f, label = "app press")
-    val iconSize by animateDpAsState(size.dp, label = "icon size")
-    val bounds = remember { android.graphics.Rect() }
-    Column(modifier.fillMaxWidth().heightIn(min = 48.dp).semantics(mergeDescendants = true) { contentDescription = app.label }
-        .clickable(interactionSource = interaction, indication = LocalIndication.current,
-            role = Role.Button, onClick = { onClick(bounds) })
-        .semantics { onLongClick("App options") { onLongClick(); true } }.padding(horizontal = 2.dp),
-        horizontalAlignment = Alignment.CenterHorizontally) {
-        Image(app.icon.asImageBitmap(), null, Modifier.size(iconSize).onGloballyPositioned { bounds.set(it.boundsInWindow().toAndroidBounds()) }
-            .graphicsLayer { scaleX = scale; scaleY = scale }.clip(RoundedCornerShape((size * .24f).dp)))
-        if (labels) Text(app.label, color = Color.White, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1,
-            overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
-            style = TextStyle(shadow = Shadow(Color.Black.copy(alpha = .55f), Offset(0f, 1f), 3f)), modifier = Modifier.padding(top = 4.dp))
-    }
-}
+/** The top band is two rows tall and holds the page's tall widgets, whatever the grid's row count. */
+private const val WIDGET_BAND_ROWS = 2
+private const val WIDGET_BAND_GAP = 18f
+private val WIDGET_INSET = 5.dp
+private const val DROP_FILL = 0.25f
+private const val DROP_EDGE = 0.8f

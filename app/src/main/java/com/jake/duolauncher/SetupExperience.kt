@@ -1,24 +1,44 @@
 package com.jake.duolauncher
 
 import android.content.Context
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Widgets
-import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import com.jake.duolauncher.design.DEFAULT_GLASS_LEVEL
+import com.jake.duolauncher.design.DuoTokens
+import com.jake.duolauncher.design.LocalDuoTypography
+import com.jake.duolauncher.design.rememberDuoTypography
+import com.jake.duolauncher.design.rememberMotionEnabled
+import com.jake.duolauncher.icons.IconAppearance
 
 internal enum class SetupEntryDecision { SHOW, ALREADY_FINISHED, EXISTING_INSTALL }
 
@@ -66,6 +86,22 @@ internal class SetupExperience(context: Context, prefsName: String = PREFS) {
     }
 }
 
+/**
+ * The Liquid Glass welcome flow shown on a fresh install only (FR-81).
+ *
+ * Steps run **Set as Home → Choose look → Turn on badges → Gestures and lock → Done**. Every step
+ * after the first is optional: each one offers Skip, and **Explore Home** leaves the whole flow at
+ * any point. Skipping everything leaves a fully working launcher, because nothing here is required
+ * for Home to draw — the two access steps only ask for optional grants (AC-65).
+ *
+ * The parameter list is source-frozen for `FirstRunSheetHost` in `home/HomeSheets.kt`: the first
+ * five parameters keep their names, types and meanings, and everything added since carries a
+ * default so existing call sites compile untouched.
+ *
+ * The **Choose look** selections are hoisted rather than persisted here. This composable owns no
+ * settings storage; it reports the user's choice through [onAppearanceMode], [onGlassLevel] and
+ * [onIconAppearance] so the launcher's own settings store is the only writer.
+ */
 @Composable
 internal fun FirstRunSetupSheet(
     isDefaultHome: Boolean,
@@ -73,88 +109,105 @@ internal fun FirstRunSetupSheet(
     onAddWidget: () -> Unit,
     onExplore: () -> Unit,
     onSkip: () -> Unit,
+    appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
+    onAppearanceMode: (AppearanceMode) -> Unit = {},
+    glassLevel: Int = DEFAULT_GLASS_LEVEL,
+    onGlassLevel: (Int) -> Unit = {},
+    iconAppearance: IconAppearance = IconAppearance.DEFAULT,
+    onIconAppearance: (IconAppearance) -> Unit = {},
+    /** Overrides the flow's own launch of Duo's notification-access screen. */
+    onOpenBadgeAccess: (() -> Unit)? = null,
+    /** Overrides the flow's own launch of Android's Accessibility settings. */
+    onOpenShadeAccess: (() -> Unit)? = null,
+    /** Overrides the flow's own launch of Duo's App info page (restricted settings). */
+    onOpenAppInfo: (() -> Unit)? = null,
 ) {
+    val steps = SetupStep.entries
+    var stepIndex by rememberSaveable { mutableIntStateOf(0) }
+    val index = stepIndex.coerceIn(0, steps.lastIndex)
+    val step = steps[index]
+    val motionEnabled = rememberMotionEnabled()
     val maxHeight = with(LocalDensity.current) {
         (LocalWindowInfo.current.containerSize.height * .9f).toDp()
     }
-    Column(
-        Modifier.fillMaxWidth().heightIn(max = maxHeight).verticalScroll(rememberScrollState())
-            .navigationBarsPadding().padding(horizontal = 24.dp).padding(bottom = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-            Box(
-                Modifier.size(54.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(18.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Rounded.Home, null, tint = MaterialTheme.colorScheme.onPrimary)
-            }
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Welcome to Duo", style = MaterialTheme.typography.headlineSmall)
-                Text(
-                    "A quiet Home screen built for both sides of your foldable.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            IconButton(onClick = onSkip, Modifier.testTag("setup-close")) {
-                Icon(Icons.Rounded.Close, "Close welcome")
-            }
-        }
 
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .52f),
-            shape = RoundedCornerShape(22.dp),
+    CompositionLocalProvider(LocalDuoTypography provides rememberDuoTypography()) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(max = maxHeight).verticalScroll(rememberScrollState())
+                .navigationBarsPadding().padding(horizontal = DuoTokens.space.xxl)
+                .padding(bottom = DuoTokens.space.xl),
+            verticalArrangement = Arrangement.spacedBy(DuoTokens.space.lg),
         ) {
-            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                SetupGuideRow(
-                    icon = if (isDefaultHome) Icons.Rounded.Check else Icons.Rounded.Home,
-                    title = if (isDefaultHome) "Duo is your Home app" else "Choose Duo as your Home app",
-                    detail = if (isDefaultHome) "The Home button returns here."
-                        else "Android will show the Home app chooser. You can switch back anytime.",
-                )
-                if (!isDefaultHome) Button(
-                    onClick = onMakeDefault,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("setup-make-default"),
-                ) { Text("Choose Home app") }
-                HorizontalDivider()
-                SetupGuideRow(
-                    icon = Icons.Rounded.Widgets,
-                    title = "Make the space useful",
-                    detail = "Add a widget now, or long-press empty space later to customize any page.",
-                )
-                OutlinedButton(
-                    onClick = onAddWidget,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("setup-add-widget"),
-                ) { Text("Add a widget") }
-            }
-        }
+            SetupHeader(step = step, index = index, total = steps.size, onClose = onSkip)
 
-        Button(
-            onClick = onExplore,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp).testTag("setup-explore"),
-        ) { Text("Explore Home") }
-        TextButton(
-            onClick = onSkip,
-            modifier = Modifier.align(Alignment.CenterHorizontally).testTag("setup-skip"),
-        ) { Text("Not now") }
+            AnimatedContent(
+                targetState = index,
+                transitionSpec = { setupStepTransition(motionEnabled, forward = targetState >= initialState) },
+                label = "setup-step",
+            ) { animatedIndex ->
+                SetupStepCard(
+                    step = steps[animatedIndex.coerceIn(0, steps.lastIndex)],
+                    isDefaultHome = isDefaultHome,
+                    onMakeDefault = onMakeDefault,
+                    onAddWidget = onAddWidget,
+                    onSkipStep = { stepIndex = (index + 1).coerceAtMost(steps.lastIndex) },
+                    appearanceMode = appearanceMode,
+                    onAppearanceMode = onAppearanceMode,
+                    glassLevel = glassLevel,
+                    onGlassLevel = onGlassLevel,
+                    iconAppearance = iconAppearance,
+                    onIconAppearance = onIconAppearance,
+                    onOpenBadgeAccess = onOpenBadgeAccess,
+                    onOpenShadeAccess = onOpenShadeAccess,
+                    onOpenAppInfo = onOpenAppInfo,
+                )
+            }
+
+            SetupFooter(
+                step = step,
+                onContinue = { stepIndex = (index + 1).coerceAtMost(steps.lastIndex) },
+                onExplore = onExplore,
+            )
+        }
     }
 }
 
+/**
+ * Step-to-step motion (FR-10), suppressed entirely while the animator duration scale is 0 (FR-11).
+ */
+private fun AnimatedContentTransitionScope<Int>.setupStepTransition(
+    motionEnabled: Boolean,
+    forward: Boolean,
+): ContentTransform = if (!motionEnabled) {
+    fadeIn(snap()) togetherWith fadeOut(snap()) using
+        SizeTransform(clip = false, sizeAnimationSpec = { _, _ -> snap() })
+} else {
+    val offset = if (forward) 1 else -1
+    (
+        fadeIn(DuoTokens.motion.standard()) +
+            slideInHorizontally(DuoTokens.motion.standard<IntOffset>()) { width -> offset * width / SLIDE_FRACTION }
+        ) togetherWith (
+        fadeOut(DuoTokens.motion.standard()) +
+            slideOutHorizontally(DuoTokens.motion.standard<IntOffset>()) { width -> -offset * width / SLIDE_FRACTION }
+        ) using SizeTransform(clip = false, sizeAnimationSpec = { _, _ -> DuoTokens.motion.standard() })
+}
+
+/** Steps slide by a fraction of their width, so the outgoing card stays legible as it leaves. */
+private const val SLIDE_FRACTION = 6
+
 @Composable
-private fun SetupGuideRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    detail: String,
-) {
-    Row(verticalAlignment = Alignment.Top) {
-        Icon(icon, null, Modifier.padding(top = 2.dp).size(22.dp), tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(12.dp))
-        Column {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(detail, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun SetupHeader(step: SetupStep, index: Int, total: Int, onClose: () -> Unit) {
+    val type = LocalDuoTypography.current
+    Row(Modifier.fillMaxWidth().padding(top = DuoTokens.space.sm), verticalAlignment = Alignment.Top) {
+        Column(Modifier.weight(1f)) {
+            SetupLabel(text = step.title, style = type.title2, tone = SetupTone.PRIMARY)
+            SetupLabel(
+                text = "Step ${index + 1} of $total",
+                style = type.footnote,
+                tone = SetupTone.TERTIARY,
+            )
         }
+        Spacer(Modifier.width(DuoTokens.space.md))
+        SetupCloseButton(onClose = onClose)
     }
 }

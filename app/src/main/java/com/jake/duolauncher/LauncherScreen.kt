@@ -23,7 +23,15 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.jake.duolauncher.badges.DuoBadges
+import com.jake.duolauncher.design.BlurBackdrop
+import com.jake.duolauncher.design.LocalDuoBackdrop
+import com.jake.duolauncher.design.LocalGlassLevel
+import com.jake.duolauncher.design.LocalReduceTransparency
+import com.jake.duolauncher.design.rememberDuoBackdrop
 import com.jake.duolauncher.home.*
+import com.jake.duolauncher.library.libraryAppsOf
 
 internal val Ink: Color
     @Composable get() = LocalDuoPalette.current.ink
@@ -50,6 +58,8 @@ fun LauncherScreen(
     onLaunch: (AppEntry) -> Unit, onMakeDefault: () -> Unit, onAppInfo: (AppEntry) -> Unit,
     isDefaultHome: Boolean, deviceStatus: DeviceStatus, onStatusMode: (Boolean) -> Unit, onWallpaperPreview: () -> Unit,
     onDiscover: () -> Unit = {}, searchRequests: Int = 0,
+    /** FR-80: bumped by the activity when the **Duo Settings** launcher entry opened it. */
+    settingsRequests: Int = 0,
     onLaunchFrom: (AppEntry, android.graphics.Rect?) -> Unit = { app, _ -> onLaunch(app) },
     onGoogleSearch: (android.graphics.Rect?) -> Boolean = { false },
     appearance: AppearanceState = AppearanceState(),
@@ -60,9 +70,19 @@ fun LauncherScreen(
     showFirstRun: Boolean = false,
     onFinishFirstRun: () -> Unit = {},
     onShadeSetup: () -> Unit = {},
+    /**
+     * Icon appearance, badges, labels and the Glass slider (FR-5, FR-14 to FR-17, FR-20).
+     *
+     * This is the single seam the schema-9 settings task writes to: build it from the persisted
+     * settings block and every Home surface follows. The default reproduces today's look.
+     */
+    homeAppearance: HomeAppearance = homeAppearanceOf(state),
 ) {
     val sheetState = rememberSaveable { mutableStateOf("") }
     var sheet by sheetState
+    // FR-51, FR-71: Search is a full-screen overlay above Home rather than a pager page, so it can
+    // open from any page without renumbering them. Saved, so FR-44's fold/unfold keeps it open.
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
     val dockSlotState = rememberSaveable { mutableIntStateOf(0) }
     var dockSlot by dockSlotState
     val widgetSlotState = rememberSaveable { mutableIntStateOf(0) }
@@ -113,7 +133,13 @@ fun LauncherScreen(
     val visibleHomePages = homePages + if (drag.active || widgetSession != null || pendingNewPage) 1 else 0
     val expandedWorkspaceState = remember { mutableStateOf(false) }
     var expandedWorkspace by expandedWorkspaceState
-    val firstHome = if (DiscoverBounds.available) 1 else 0
+    // FR-36, FR-55: Discover owns the page left of Home 1 only when the user actually chose it and
+    // the device can show it. A fresh install defaults to Today View, so Discover must not claim
+    // that page there — and because `firstHome` is what threads the whole native-Discover path
+    // (LiveDiscover, DiscoverBounds, the motion bridge), gating it here is what keeps that machinery
+    // entirely dormant rather than running behind a page the user never selected.
+    val discoverLeading = state.leadingPage.kind == LeadingPageKind.DISCOVER && DiscoverBounds.available
+    val firstHome = if (discoverLeading) 1 else 0
     val pageCount = visibleHomePages + 1
     val nativePager = rememberPagerState(initialPage = savedPage.coerceIn(-firstHome, pageCount - 1) + firstHome, pageCount = { pageCount + firstHome })
     val pager = remember(nativePager) { LauncherPager(nativePager, firstHome) }
@@ -161,6 +187,27 @@ fun LauncherScreen(
         previousHomePages = homePages
         previousEditRevision = state.editRevision
     }
+    // AC-38: a hidden page is skipped, not removed. Every page stays composed and keeps its number,
+    // so drag addressing, widget bindings and the one-page gesture limit are all untouched; a swipe
+    // that comes to rest on a hidden page simply carries on to the next visible one in the direction
+    // it was travelling. Remapping pager indices instead would have had to thread a translation
+    // through every drop target, which is the regression boundary this deliberately stays out of.
+    val hiddenPages = remember(state.layoutSet, state.expandedActive, homePages) {
+        val surface = homeSurfaceConfigOf(state)
+        hiddenPageNumbers(surface.pageIds, surface.hiddenPageIds, homePages)
+    }
+    LaunchedEffect(pager, hiddenPages) {
+        if (hiddenPages.isEmpty()) return@LaunchedEffect
+        var previous = pager.settledPage
+        snapshotFlow { pager.settledPage to drag.active }.distinctUntilChanged().collect { (page, moving) ->
+            if (!moving && page in hiddenPages) {
+                // The App Library is the page after the last Home page and can never be hidden.
+                nextVisiblePage(page, forward = page >= previous, pageCount = homePages + 1, hidden = hiddenPages)
+                    ?.let { pager.animateScrollToPage(it) }
+            }
+            previous = page
+        }
+    }
     LaunchedEffect(pager.settledPage) { if (pager.settledPage != homePages) focus.clearFocus() }
     LaunchedEffect(state.verticalStatus) { onStatusMode(state.verticalStatus) }
     LaunchedEffect(homeRequests) { if (homeRequests > 0) {
@@ -169,12 +216,19 @@ fun LauncherScreen(
             ?: lastHomePage.coerceIn(0, homePages - 1)
         drag.clear(); widgetSession = null; resizeSlot = null; sheet = ""; widgetPackage = null
         widgetExactTarget = false; widgetPlacementMessage = null; selectedId = null; appMoveMenu = false
+        searchOpen = false
         openFolderId = null; createFolderFirstId = null; emptyCellIndex = null
         focus.clearFocus(); keyboard?.hide()
         pager.animateScrollToPage(page)
     } }
     LaunchedEffect(searchRequests) { if (searchRequests > 0) { drag.clear(); widgetSession = null; resizeSlot = null; sheet = ""; widgetPackage = null; widgetExactTarget = false; selectedId = null
-        if (!state.googleSearch || !onGoogleSearch(null)) pager.animateScrollToPage(homePages)
+        // FR-71: Duo's own Search, unless the user chose to hand search to Google.
+        if (!state.googleSearch || !onGoogleSearch(null)) searchOpen = true
+    } }
+    // FR-80: the launcher entry lands straight in Duo Settings.
+    LaunchedEffect(settingsRequests) { if (settingsRequests > 0) {
+        drag.clear(); widgetSession = null; resizeSlot = null; selectedId = null; searchOpen = false
+        sheet = "settings"
     } }
     val widgetPickerBack = {
         if (widgetSession != null) {
@@ -190,6 +244,7 @@ fun LauncherScreen(
     } else if (selectedId != null) selectedId = null else { focus.clearFocus(); scope.launch { pager.animateScrollToPage(0) } } }
     val openDiscover = { if (firstHome > 0) scope.launch { pager.animateScrollToPage(-1) } else onDiscover(); Unit }
     val openLibrary = { scope.launch { pager.animateScrollToPage(homePages) }; Unit }
+    val openSearch = { focus.clearFocus(); searchOpen = true }
 
     val dragWindowPage = if (expandedWorkspace && (drag.active || widgetSession != null)) pager.settledPage else pager.currentPage
     val eligibleDragPages = remember(expandedWorkspace, dragWindowPage, visibleHomePages) {
@@ -286,6 +341,18 @@ fun LauncherScreen(
         }
     }
 
+    val backdrop = rememberDuoBackdrop()
+    val launcherContext = androidx.compose.ui.platform.LocalContext.current
+    val iconRenderer = remember(launcherContext) { DuoIcons.renderer(launcherContext) }
+    // FR-75, FR-77, NFR-P3: the exclusions every surface shares, and Search's folded app index,
+    // follow the *catalog* rather than the keystroke. Keyed on the app list and the hidden set only,
+    // so typing in Search never re-folds three hundred labels.
+    LaunchedEffect(state.apps, state.hiddenApps) {
+        DuoHost.publishCatalog(launcherContext, state, libraryAppsOf(state.apps))
+    }
+    val badgeRepository = remember(launcherContext) { DuoBadges.repository(launcherContext) }
+    // One collector for the whole tree; tiles read the map, never a flow of their own.
+    val badges by badgeRepository.badges.collectAsStateWithLifecycle()
     val homeLayer = rememberGraphicsLayer()
     DisposableEffect(homeLayer) {
         homeLayer.compositingStrategy = androidx.compose.ui.graphics.layer.CompositingStrategy.Offscreen
@@ -297,7 +364,11 @@ fun LauncherScreen(
         // a complete render target so cross-window damage cannot erase stationary controls.
         compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
     }.onSizeChanged { LiveDiscover.fullSize = androidx.compose.ui.geometry.Size(it.width.toFloat(), it.height.toFloat()) }.testTag("launcher-root").homeDragInput(drag,
-        enabled = sheet.isEmpty() && !showFirstRun && selectedId == null && resizeSlot == null && pager.currentPage >= 0,
+        // FR-49: a locked layout refuses pickup at the source. The − badges are already hidden and
+        // the model refuses the write, but without this the icons still detach and follow a finger,
+        // which reads as "the drag worked and was then undone".
+        enabled = sheet.isEmpty() && !showFirstRun && selectedId == null && resizeSlot == null &&
+            pager.currentPage >= 0 && !state.settings.lockLayout,
         page = pager.currentPage, eligiblePages = eligibleDragPages, onStart = {
             focus.clearFocus(); keyboard?.hide(); haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             if (drag.source?.folderId != null) openFolderId = null
@@ -307,7 +378,17 @@ fun LauncherScreen(
             }
         },
         onFinish = { cancelled -> finishDrag(cancelled) })) {
-        DuneWallpaper()
+        // ADR-3 / NFR-P6: the wallpaper is captured into ONE blurred layer that every GlassSurface
+        // samples. Only the wallpaper is inside the source, so glass never blurs itself.
+        BlurBackdrop(Modifier.fillMaxSize(), backdrop) { DuneWallpaper() }
+        CompositionLocalProvider(
+            LocalDuoBackdrop provides backdrop,
+            LocalGlassLevel provides homeAppearance.glass,
+            LocalReduceTransparency provides homeAppearance.reduceTransparency,
+            LocalHomeAppearance provides homeAppearance,
+            LocalIconRenderer provides iconRenderer,
+            LocalBadges provides if (homeAppearance.badgesEnabled) badges else emptyMap(),
+        ) {
         HomeWorkspace(
             state = state, model = model, widgets = widgets, drag = drag, pager = pager,
             nativePager = nativePager, pageGestures = pageGestures, pageFling = pageFling,
@@ -318,6 +399,10 @@ fun LauncherScreen(
             widgetRawTarget = widgetRawTarget, visibleHomePages = visibleHomePages,
             homePages = homePages, firstHome = firstHome, lastHomePage = lastHomePage,
             isDefaultHome = isDefaultHome, showFirstRun = showFirstRun, deviceStatus = deviceStatus,
+            // FR-47: the Page overview's three edits, which were no-ops until the model had them.
+            onReorderPages = { from, to -> model.reorderPages(from, to) },
+            onSetPageHidden = { model.setPageHidden(it) },
+            onDeletePage = { model.deletePage(it) },
             appearance = appearance, onLaunch = onLaunch, onLaunchFrom = onLaunchFrom,
             onAppInfo = onAppInfo, onMakeDefault = onMakeDefault, onDiscover = onDiscover,
             onGoogleSearch = onGoogleSearch, onWallpaperPreview = onWallpaperPreview,
@@ -327,6 +412,7 @@ fun LauncherScreen(
             onAppearanceClear = onAppearanceClear,
             leaveTemporaryWidgetPage = ::leaveTemporaryWidgetPage,
             widgetPickerBack = widgetPickerBack, openLibrary = openLibrary, openDiscover = openDiscover,
+            openSearch = openSearch,
             sheetState = sheetState, dockSlotState = dockSlotState, widgetSlotState = widgetSlotState,
             widgetExactTargetState = widgetExactTargetState, widgetPackageState = widgetPackageState,
             widgetSessionState = widgetSessionState,
@@ -337,5 +423,13 @@ fun LauncherScreen(
             createFolderFirstIdState = createFolderFirstIdState,
             expandedWorkspaceState = expandedWorkspaceState,
         )
+        // Inside the backdrop's composition locals on purpose: Search is one full-bleed glass
+        // panel, and outside this scope it has no blurred wallpaper to sample.
+        if (searchOpen) SearchHost(
+            state = state, model = model, activity = launcherActivity,
+            onLaunchApp = { app -> searchOpen = false; onLaunch(app) },
+            onDismiss = { searchOpen = false },
+        )
+        }
     }
 }

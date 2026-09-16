@@ -4,7 +4,18 @@ import java.util.UUID
 
 private const val FOLDER_PREFIX = "folder:"
 
-data class FolderEntry(val id: String, val title: String, val appIds: List<String>)
+/**
+ * A folder. [tint] and [size] are schema-9 presentation settings (FR-66) and default to the
+ * pre-schema-9 appearance, so every existing construction site and stored folder keeps its meaning.
+ */
+data class FolderEntry(
+    val id: String,
+    val title: String,
+    val appIds: List<String>,
+    /** An accent preset colour, or [FOLDER_TINT_FOLLOWS_ACCENT] to follow the global accent. */
+    val tint: Int = FOLDER_TINT_FOLLOWS_ACCENT,
+    val size: DuoFolderSize = DuoFolderSize.SMALL,
+)
 
 fun newFolderId(): String = FOLDER_PREFIX + UUID.randomUUID()
 fun isReservedFolderId(id: String) = id.startsWith(FOLDER_PREFIX)

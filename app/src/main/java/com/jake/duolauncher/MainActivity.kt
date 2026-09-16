@@ -29,7 +29,10 @@ import androidx.core.content.ContextCompat
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
+import com.jake.duolauncher.badges.NotificationAccess
+import com.jake.duolauncher.home.DuoHost
 import com.jake.duolauncher.shortcuts.DuoShortcuts
+import com.jake.duolauncher.today.builtin.TodayFeeds
 
 class MainActivity : ComponentActivity() {
     private val model: LauncherModel by viewModels()
@@ -44,6 +47,31 @@ class MainActivity : ComponentActivity() {
     private val showFirstRun = mutableStateOf(false)
     private lateinit var setupExperience: SetupExperience
     private lateinit var status: DeviceStatusMonitor
+
+    /**
+     * The Today View's data sources (FR-59).
+     *
+     * Attached to this activity's lifecycle exactly as [DeviceStatusMonitor] is, so nothing is
+     * registered, queried or held while the launcher is stopped, and released in `onDestroy` so its
+     * background thread does not outlive the window.
+     */
+    internal lateinit var todayFeeds: TodayFeeds
+        private set
+
+    /** FR-80: bumped when the **Duo Settings** launcher entry opens this activity. */
+    private val settingsRequests = mutableIntStateOf(0)
+
+    private val contactsPermission = activityResultRegistry.register(
+        "duo.search.contacts", this, ActivityResultContracts.RequestPermission(),
+    ) { /* Search re-reads the grant on resume, so there is nothing to push. */ }
+
+    private val calendarPermission = activityResultRegistry.register(
+        "duo.today.calendar", this, ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        // The feed re-reads the permission itself; this only makes it look again immediately
+        // rather than at the next minute tick.
+        if (granted && ::todayFeeds.isInitialized) todayFeeds.calendar.refresh()
+    }
     private lateinit var appearance: AppearanceStore
     private var appearanceLocationGeneration = 0
     private var appearancePermissionGeneration = -1
@@ -85,8 +113,10 @@ class MainActivity : ComponentActivity() {
             LiveDiscover.setExternalResultPending(this, "main", "launcher-background", active)
         }
         status = DeviceStatusMonitor(this).also { lifecycle.addObserver(it) }
+        todayFeeds = TodayFeeds(this, DuoHost.ranker(this), status.state).also { lifecycle.addObserver(it) }
         updateDefaultHome()
         if (savedInstanceState == null && intent.getStringExtra("duo_destination") == "search") searchRequests.intValue++
+        if (savedInstanceState == null && launchedFromSettingsEntry(intent)) settingsRequests.intValue++
         intent.removeExtra("duo_destination")
         setContent {
             val state = model.state.collectAsStateWithLifecycle().value
@@ -96,6 +126,7 @@ class MainActivity : ComponentActivity() {
                     onLaunch = { launchApp(it) }, onMakeDefault = ::makeDefault, onAppInfo = ::appInfo,
                     isDefaultHome = defaultHome.value, deviceStatus = deviceStatus, onStatusMode = ::setStatusMode, onWallpaperPreview = ::previewWallpaper,
                     onDiscover = ::openDiscover, searchRequests = searchRequests.intValue,
+                    settingsRequests = settingsRequests.intValue,
                     onLaunchFrom = ::launchApp, onGoogleSearch = ::openGoogleSearch,
                     appearance = appearance.state,
                     onAppearanceMode = { cancelAppearanceLocation(); appearance.setMode(it, systemDark()) },
@@ -136,7 +167,36 @@ class MainActivity : ComponentActivity() {
         shadeSetupDialog?.dismiss()
         if (!isChangingConfigurations) releaseShadeSetupOwnership()
         cancelAppearanceLocation()
+        if (::todayFeeds.isInitialized) todayFeeds.release()
         super.onDestroy()
+    }
+
+    /**
+     * FR-80: whether this start came from the **Duo Settings** launcher entry.
+     *
+     * The alias shares MainActivity, so the component name it was resolved through is the only
+     * thing that tells the two launcher entries apart.
+     */
+    private fun launchedFromSettingsEntry(intent: Intent): Boolean =
+        intent.component?.className?.endsWith(SETTINGS_ALIAS) == true
+
+    /** FR-72: Search's **Allow contacts in Search**. Search never requests a permission itself. */
+    internal fun requestContactsAccess() {
+        runCatching { contactsPermission.launch(android.Manifest.permission.READ_CONTACTS) }
+    }
+
+    /** FR-59: the Calendar widget's **Turn on**. The widget never requests a permission itself. */
+    internal fun requestCalendarAccess() {
+        runCatching { calendarPermission.launch(android.Manifest.permission.READ_CALENDAR) }
+    }
+
+    /** FR-59, AC-49: the Now Playing widget's **Turn on**, and the badge access route (FR-23). */
+    internal fun openNotificationAccess() {
+        runCatching { startActivity(NotificationAccess.settingsIntent(this)) }
+            .recoverCatching { startActivity(NotificationAccess.listSettingsIntent()) }
+            .onFailure {
+                Toast.makeText(this, "Notification settings are unavailable.", Toast.LENGTH_LONG).show()
+            }
     }
     override fun onResume() {
         super.onResume()
@@ -223,6 +283,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         FoldRenderExperiment.onNewIntent(this, intent)
         if (intent.getStringExtra("duo_destination") == "search") searchRequests.intValue++
+        else if (launchedFromSettingsEntry(intent)) settingsRequests.intValue++
         else if (intent.hasCategory(Intent.CATEGORY_HOME) || intent.getStringExtra("duo_destination") == "home") homeRequests.intValue++
         intent.removeExtra("duo_destination")
     }
@@ -391,6 +452,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        /** Matches `.DuoSettingsAlias` in the manifest. */
+        const val SETTINGS_ALIAS = "DuoSettingsAlias"
         const val SHADE_DIALOG_VISIBLE = "duo.shade.dialog_visible"
         const val SHADE_SETTINGS_PENDING = "duo.shade.settings_pending"
     }

@@ -18,6 +18,9 @@ internal fun LayoutRestorePreview(preview: LayoutImportPreview, onRestore: () ->
                 if (preview.layout.leadingSlots.any { it != null } || preview.layout.widgetPlacements.any { it.page == -1 })
                     Text("Includes your unfolded-only page.", style = MaterialTheme.typography.bodySmall)
                 Text("This also restores icon layout, labels, search, and status settings.")
+                if (preview.version >= LAYOUT_BACKUP_VERSION)
+                    Text("It replaces every Home layout, grid and dock, and your Duo settings, with the ones in this backup.",
+                        style = MaterialTheme.typography.bodySmall)
                 Text("Your selected launcher background photo is not included in layout backups.",
                     style = MaterialTheme.typography.bodySmall)
                 if (preview.missingApps.isNotEmpty()) {

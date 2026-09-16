@@ -10,6 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
+import com.jake.duolauncher.profiles.DuoPrivateSpace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -74,7 +75,9 @@ class BackupController(
 
     fun startExport(fileName: String = "duo-launcher-layout.json") {
         val state = model.state.value
-        val raw = runCatching { encodeLayoutBackup(state, widgetDescriptors(state), scope) }.getOrElse {
+        val raw = runCatching {
+            encodeLayoutBackup(state, widgetDescriptors(state), scope, privateSpaceGate())
+        }.getOrElse {
             errorMessage = it.message ?: "Layout backup could not be prepared."; return
         }
         begin(OP_EXPORT, raw)
@@ -98,10 +101,16 @@ class BackupController(
             } }
             result.rethrowCancellation()
             if (token != generation || operation != OP_PREVIEW) return@launch
-            result.onSuccess {
-                val changed = model.applyImportedLayout(it)
-                successMessage = if (changed) "Layout restored. Widgets are ready to reconnect." else "This layout is already active."
-                clearTransaction(clearMessages = false)
+            result.onSuccess { preview ->
+                // Applying validates the merged state and refuses anything that would not save, so
+                // a rejection lands on the same failure path a malformed payload takes: an error
+                // message, and a layout that was never touched.
+                val applied = runCatching { model.applyImportedLayout(preview) }
+                applied.rethrowCancellation()
+                applied.onSuccess { changed ->
+                    successMessage = if (changed) "Layout restored. Widgets are ready to reconnect." else "This layout is already active."
+                    clearTransaction(clearMessages = false)
+                }.onFailure { errorMessage = it.message ?: "This layout backup is no longer valid." }
             }.onFailure { errorMessage = it.message ?: "This layout backup is no longer valid." }
         }
         return true
@@ -198,12 +207,40 @@ class BackupController(
         }
     }
 
-    private fun widgetDescriptors(state: LauncherState): List<BackupWidgetDescriptor> = state.widgetPlacements.mapNotNull { placement ->
-        if (placement.id < 0) return@mapNotNull null
-        val info = widgets.manager.getAppWidgetInfo(placement.id) ?: error("Widget ${placement.slot} is unavailable")
-        BackupWidgetDescriptor(placement.slot, info.provider.flattenToString(), userManager.getSerialNumberForUser(info.profile),
-            info.loadLabel(activity.packageManager).toString(), if (info.profile == android.os.Process.myUserHandle()) "Personal" else "Work",
-            isWork = info.profile != android.os.Process.myUserHandle())
+    /**
+     * Portable descriptors for every bound widget in **every** layout, not just the one on screen.
+     *
+     * Backup v3 exports the mirrored, cover and inner layouts, so a widget sitting on an off-screen
+     * layout needs a descriptor too or the export would fail on it. Slots are unique across all
+     * three layouts (`LauncherModel.nextWidgetSlot`), so keying by slot stays unambiguous.
+     */
+    private fun widgetDescriptors(state: LauncherState): List<BackupWidgetDescriptor> =
+        LayoutTarget.entries.flatMap { state.exportedLayoutSet().layout(it).widgetPlacements }
+            .distinctBy(WidgetPlacement::slot)
+            .mapNotNull { placement ->
+                if (placement.id < 0) return@mapNotNull null
+                val info = widgets.manager.getAppWidgetInfo(placement.id)
+                    ?: error("Widget ${placement.slot} is unavailable")
+                BackupWidgetDescriptor(placement.slot, info.provider.flattenToString(),
+                    userManager.getSerialNumberForUser(info.profile),
+                    info.loadLabel(activity.packageManager).toString(),
+                    if (info.profile == android.os.Process.myUserHandle()) "Personal" else "Work",
+                    isWork = info.profile != android.os.Process.myUserHandle())
+            }
+
+    /**
+     * The NFR-S7 gate: an app placed from a private space that is locked right now is left out of
+     * the export entirely.
+     *
+     * It is read at export time rather than cached, so locking the space from system UI takes effect
+     * for the very next backup. The gate itself already fails closed — a profile state Duo cannot
+     * read is treated as locked — so the only case that excludes nothing is the repository being
+     * unreachable at all, which is also the case where no private space exists to leak.
+     */
+    private fun privateSpaceGate(): (String) -> Boolean {
+        val gate = runCatching { DuoPrivateSpace.repository(activity).gate }.getOrNull()
+            ?: return { false }
+        return gate.asPredicate()
     }
 
     private fun clearTransaction(clearMessages: Boolean = true) {

@@ -230,7 +230,7 @@ class LiveDiscoverActivity : ComponentActivity() {
         enableEdgeToEdge()
         window.setWindowAnimations(0)
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        vertical = org.json.JSONObject(getSharedPreferences("launcher", 0).getString("state", "{}") ?: "{}").optBoolean("verticalStatus", true)
+        vertical = LauncherStateSnapshot.verticalStatus(this)
         if (vertical) WindowCompat.getInsetsController(window, window.decorView).hide(WindowInsetsCompat.Type.statusBars())
         setContentView(View(this))
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {

@@ -200,6 +200,9 @@ class HomeDragIntegrationTest {
             compose.waitForIdle()
             assertNull("Result: ${model().state.value.homeSlots}", model().state.value.homeSlots[source])
             assertEquals(id, model().state.value.homeSlots[47])
+            // Layout writes are debounced, and waitForIdle does not wait out that delay, so read
+            // the saved payload only after forcing the pending write through.
+            compose.runOnIdle { model().flushPersistence() }
             val saved = org.json.JSONObject(compose.activity.getSharedPreferences("launcher", 0).getString("state", "{}")!!)
             assertEquals(id, saved.getJSONArray("homeSlots").getString(47))
             assertTrue(saved.getJSONArray("homeSlots").isNull(source))

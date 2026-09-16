@@ -42,9 +42,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.jake.duolauncher.AppEntry
 import com.jake.duolauncher.AppLibrary
+import com.jake.duolauncher.DEFAULT_GRID
 import com.jake.duolauncher.DiscoverContent
 import com.jake.duolauncher.DropTarget
-import com.jake.duolauncher.HOME_CELLS
+import com.jake.duolauncher.GridSpec
 import com.jake.duolauncher.HomeDragState
 import com.jake.duolauncher.HomeGeometry
 import com.jake.duolauncher.LauncherState
@@ -81,8 +82,16 @@ internal fun ExpandedWorkspace(
     drag: HomeDragState,
     target: DropTarget?,
     insertionTarget: DropTarget?,
+    /** Supplies the App Library's pin, work-profile and remembered-view writes (FR-69, FR-70). */
+    model: com.jake.duolauncher.LauncherModel,
     libraryQuery: String,
     onLibraryQuery: (String) -> Unit,
+    grid: GridSpec = DEFAULT_GRID,
+    editing: Boolean = false,
+    onRemoveItem: ((String) -> Unit)? = null,
+    onRemoveWidget: ((Int) -> Unit)? = null,
+    onEditMode: (() -> Unit)? = null,
+    onBackgroundTap: (() -> Unit)? = null,
     onLaunch: (AppEntry) -> Unit,
     onLaunchFrom: (AppEntry, android.graphics.Rect?) -> Unit,
     onPinned: (String, Boolean) -> Unit,
@@ -92,6 +101,15 @@ internal fun ExpandedWorkspace(
     onFolder: (String) -> Unit,
     onEmptyWidget: (Int) -> Unit,
     onRefresh: () -> Unit,
+    /**
+     * FR-55, FR-56: what the leading pane draws.
+     *
+     * Null keeps the Classic workspace grid, which is both the upgrade default and what the
+     * Classic leading-page setting selects. Supplying it replaces that grid with the Today View
+     * column, giving the first spread the widget column on the left and Home 1 on the right
+     * (AC-45) without the pager's page numbering changing at all.
+     */
+    leadingPane: (@Composable (Modifier) -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val viewportWidth = motion.pageWidth
@@ -156,13 +174,22 @@ internal fun ExpandedWorkspace(
             key("expanded-leading-home") {
                 Box(Modifier.place(leadingX).width((geometry.gridWidth + 16f).dp).fillMaxHeight()
                     .testTag("expanded-leading-home")) {
-                    HomePagePane(
-                        -1, state, previewSlots, previewLeadingSlots, previewWidgetPlacements, appsById, geometry, contentHeight, bottomSpace,
-                        widgets, drag, target, insertionTarget, showLargeWidget = true,
-                        onLaunch = onLaunchFrom, onActions = onActions, onWidget = onWidget,
-                        onFolder = onFolder, onEmptyWidget = onEmptyWidget, onRefresh = onRefresh,
-                        modifier = Modifier,
-                    )
+                    if (leadingPane != null) {
+                        leadingPane(
+                            Modifier.fillMaxSize()
+                                .padding(start = 16.dp, top = geometry.contentTop.dp, bottom = bottomSpace),
+                        )
+                    } else {
+                        HomePagePane(
+                            -1, state, previewSlots, previewLeadingSlots, previewWidgetPlacements, appsById, geometry, contentHeight, bottomSpace,
+                            widgets, drag, target, insertionTarget, showLargeWidget = true,
+                            grid = grid, editing = editing, onRemoveItem = onRemoveItem, onRemoveWidget = onRemoveWidget,
+                            onEditMode = onEditMode, onBackgroundTap = onBackgroundTap,
+                            onLaunch = onLaunchFrom, onActions = onActions, onWidget = onWidget,
+                            onFolder = onFolder, onEmptyWidget = onEmptyWidget, onRefresh = onRefresh,
+                            modifier = Modifier,
+                        )
+                    }
                 }
             }
         }
@@ -175,6 +202,8 @@ internal fun ExpandedWorkspace(
                         HomePagePane(
                             page, state, previewSlots, previewLeadingSlots, previewWidgetPlacements, appsById, geometry, contentHeight, bottomSpace,
                             widgets, drag, target, insertionTarget, showLargeWidget = page > 0,
+                            grid = grid, editing = editing, onRemoveItem = onRemoveItem, onRemoveWidget = onRemoveWidget,
+                            onEditMode = onEditMode, onBackgroundTap = onBackgroundTap,
                             onLaunch = onLaunchFrom, onActions = onActions, onWidget = onWidget,
                             onFolder = onFolder,
                             onEmptyWidget = onEmptyWidget,
@@ -188,11 +217,11 @@ internal fun ExpandedWorkspace(
         if (showLibrary) {
             key("library-pane") {
                 Box(Modifier.place((visibleHomePages - 1) * stride + viewportWidth).fillMaxSize()) {
-                    AppLibrary(state, libraryQuery, onLibraryQuery, onLaunch, onPinned,
+                    HostedAppLibrary(state, model, libraryQuery, onLibraryQuery, onLaunch,
                         onActions = onActions,
                         modifier = Modifier.fillMaxSize().padding(start = 16.dp, top = 16.dp, bottom = bottomSpace)
                             .testTag("library-page"),
-                        drag = drag, page = visibleHomePages, onLaunchFrom = onLaunchFrom, onTurnOnWork = onTurnOnWork)
+                        drag = drag, page = visibleHomePages, onLaunchFrom = onLaunchFrom)
                 }
             }
         }
@@ -215,6 +244,14 @@ internal fun HomePagePane(
     target: DropTarget?,
     insertionTarget: DropTarget?,
     showLargeWidget: Boolean,
+    grid: GridSpec = DEFAULT_GRID,
+    editing: Boolean = false,
+    onRemoveItem: ((String) -> Unit)? = null,
+    onRemoveWidget: ((Int) -> Unit)? = null,
+    /** FR-45: a long-press on empty Home background enters Edit mode instead of opening a sheet. */
+    onEditMode: (() -> Unit)? = null,
+    /** FR-48: a tap on empty Home background leaves Edit mode. */
+    onBackgroundTap: (() -> Unit)? = null,
     onLaunch: (AppEntry, android.graphics.Rect?) -> Unit,
     onActions: (AppEntry) -> Unit,
     onWidget: (Int) -> Unit,
@@ -225,9 +262,9 @@ internal fun HomePagePane(
 ) {
     val homeScroll = rememberScrollState()
     var paneBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
-    val pageStart = homeCellIndex(page, 0)
-    val backgroundTarget = (pageStart until pageStart + HOME_CELLS).firstOrNull { index ->
-        state.layout.slotAt(index) == null && state.widgetPlacements.none { index in it.coveredIndices() }
+    val pageStart = homeCellIndex(page, 0, grid)
+    val backgroundTarget = (pageStart until pageStart + grid.cells).firstOrNull { index ->
+        state.layout.slotAt(index) == null && state.widgetPlacements.none { index in it.coveredIndices(grid) }
     } ?: pageStart
     val verticalEdge = with(LocalDensity.current) { 42.dp.toPx() }
     LaunchedEffect(drag.active, page, paneBounds) {
@@ -243,10 +280,14 @@ internal fun HomePagePane(
             delay(16)
         }
     }
+    // FR-45: empty Home background is the way into Edit mode. Where no handler is supplied — the
+    // leading workspace, and any caller from before Edit mode existed — the old sheet still opens,
+    // so this is additive rather than a behaviour change for everyone.
+    val backgroundLongPress = { if (!drag.active) onEditMode?.invoke() ?: onEmptyWidget(backgroundTarget) }
     Box(modifier.testTag("home-page-$page")
         .semantics {
             onLongClick("Home options") {
-                if (!drag.active) onEmptyWidget(backgroundTarget)
+                backgroundLongPress()
                 !drag.active
             }
         }
@@ -254,16 +295,19 @@ internal fun HomePagePane(
         .width((geometry.gridWidth + 16f).dp)
         .height((contentHeight - bottomSpace).coerceAtLeast(0.dp))) {
         Box(Modifier.width(16.dp).fillMaxHeight().testTag("home-options-margin-$page")
-            .pointerInput(backgroundTarget, drag.active) {
-                detectTapGestures(onLongPress = {
-                    if (!drag.active) onEmptyWidget(backgroundTarget)
-                })
+            .pointerInput(backgroundTarget, drag.active, onEditMode, onBackgroundTap) {
+                detectTapGestures(
+                    onLongPress = { backgroundLongPress() },
+                    onTap = { onBackgroundTap?.invoke() },
+                )
             })
         Column(Modifier.offset(x = 16.dp).width(geometry.gridWidth.dp).fillMaxHeight()
             .verticalScroll(homeScroll).padding(top = geometry.contentTop.dp, bottom = 8.dp)) {
             SharedHomeGrid(page, state.homeSlots, state.leadingSlots, previewSlots, previewLeadingSlots, previewWidgetPlacements,
-                appsById, geometry, state.labels, widgets, drag, target,
-                folders = state.folders, onLaunch = onLaunch, onActions = onActions, onWidget = onWidget,
+                appsById, geometry, widgets, drag, target,
+                folders = state.folders, grid = grid, editing = editing,
+                onRemoveItem = onRemoveItem, onRemoveWidget = onRemoveWidget,
+                onLaunch = onLaunch, onActions = onActions, onWidget = onWidget,
                 onFolder = onFolder, onEmptyWidget = onEmptyWidget)
             if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(16.dp))
             if (state.error != null) Text(state.error, color = Color.White,

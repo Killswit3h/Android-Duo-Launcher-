@@ -64,6 +64,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.window.WindowSdkExtensions
 import androidx.window.embedding.*
+import com.jake.duolauncher.home.CLUSTER_DIAMETER
+import com.jake.duolauncher.home.RAIL_EDGE
+import com.jake.duolauncher.home.StatusCluster
+import com.jake.duolauncher.home.bottomRailAlignment
+import com.jake.duolauncher.home.homeSurfaceConfigOf
+import com.jake.duolauncher.home.pagerAlignment
+import com.jake.duolauncher.home.topRailAlignment
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -227,7 +234,7 @@ class DiscoverFeedActivity : DiscoverPageActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DiscoverSession.feed = WeakReference(this)
-        val vertical = runCatching { JSONObject(getSharedPreferences("launcher", 0).getString("state", "{}") ?: "{}").optBoolean("verticalStatus", true) }.getOrDefault(true)
+        val vertical = LauncherStateSnapshot.verticalStatus(this)
         configureDiscoverWindow(vertical)
         frame = DiscoverFrame(this, vertical)
         val bounds = windowManager.maximumWindowMetrics.bounds
@@ -343,6 +350,14 @@ private fun DiscoverDock(state: LauncherState, status: DeviceStatus, fullSize: S
     val context = LocalContext.current
     val fullWidth = fullSize.width / density.density
     val preset = if (fullWidth >= 650f) state.expanded else state.compact
+    // FR-37, FR-41: the Discover chrome reads the same dock side and status choice Home does, so
+    // crossing into the feed does not silently move the dock back to the right or swap the cluster
+    // for the old rail. The embedding split itself still places this pane on the right — that is a
+    // process-wide `SplitAttributes` rule and is deliberately not touched from here — so the rail
+    // and the feed viewport mirror together *within* this pane and cannot overlap.
+    val surface = remember(state.layoutSet.dock.side, state.settings.duoStatus) { homeSurfaceConfigOf(state) }
+    val railAlignment = topRailAlignment(surface.dockSide)
+    val railPadding = if (surface.dockOnRight) PaddingValues(end = RAIL_EDGE) else PaddingValues(start = RAIL_EDGE)
     val apps = remember(state.apps) { state.apps.associateBy { it.id } }
     val progress = DiscoverMotion.progress.floatValue
     val backgroundRevision = LauncherBackgroundCache.revision.intValue
@@ -363,7 +378,8 @@ private fun DiscoverDock(state: LauncherState, status: DeviceStatus, fullSize: S
             }
         }
         BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-            if (DiscoverBounds.available) Box(Modifier.fillMaxHeight().width((fullWidth - preset.dockWidth - 28).dp)
+            if (DiscoverBounds.available) Box(Modifier.align(pagerAlignment(surface.dockSide))
+                .fillMaxHeight().width((fullWidth - preset.dockWidth - 28).dp)
                 .padding(start = 16.dp, top = 16.dp, bottom = 16.dp).onGloballyPositioned {
                     val outer = it.boundsInWindow()
                     val padding = 16 * density.density
@@ -387,15 +403,22 @@ private fun DiscoverDock(state: LauncherState, status: DeviceStatus, fullSize: S
                 labelHeight = with(density) { 14.sp.toDp().value } + 6f, inLibrary = true,
                 homeBottomSpace = if (context.getSystemService(android.app.role.RoleManager::class.java)
                     .isRoleHeld(android.app.role.RoleManager.ROLE_HOME)) 44f else 88f)
-            if (state.verticalStatus) StatusRail(status, Modifier.align(Alignment.TopEnd).padding(end = 12.dp)
+            val statusModifier = Modifier.align(railAlignment).padding(railPadding)
                 .offset(y = geometry.contentTop.dp).width(preset.dockWidth.dp)
                 .onSizeChanged {
                     // The normal rail's 20dp location slot and 3dp gap do not move the dock.
                     statusHeight = (it.height / density.density -
                         if (maxHeight < 500.dp) 0f else 23f).coerceAtLeast(0f)
-                },
-                compact = maxHeight < 500.dp, iconSize = dockIconSize(geometry.iconSize).dp)
-            Surface(Modifier.align(Alignment.TopEnd).padding(end = 12.dp).offset(y = geometry.dockTop.dp)
+                }
+            // FR-41: the Discover chrome shows the same status Home does. Reading the same setting
+            // here is what stops the cluster turning back into the old rail on the way to the feed.
+            if (state.verticalStatus) {
+                if (surface.duoStatus) StatusCluster(status, statusModifier,
+                    diameter = minOf(CLUSTER_DIAMETER, preset.dockWidth.dp))
+                else StatusRail(status, statusModifier,
+                    compact = maxHeight < 500.dp, iconSize = dockIconSize(geometry.iconSize).dp)
+            }
+            Surface(Modifier.align(railAlignment).padding(railPadding).offset(y = geometry.dockTop.dp)
                 .width(preset.dockWidth.dp).height(geometry.dockHeight.dp).testTag("discover-dock"),
                 shape = RoundedCornerShape(30.dp), color = Glass.copy(alpha = .32f), border = BorderStroke(1.dp, Color.White.copy(alpha = .3f))) {
                 Column(Modifier.padding(vertical = 8.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -411,7 +434,8 @@ private fun DiscoverDock(state: LauncherState, status: DeviceStatus, fullSize: S
                     }
                 }
             }
-            Column(Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp).width(preset.dockWidth.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(Modifier.align(bottomRailAlignment(surface.dockSide)).padding(railPadding)
+                .padding(bottom = 12.dp).width(preset.dockWidth.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 // Home is physically to the right of Discover, matching our fixed page order.
                 FilledTonalIconButton(onClick = onHome, Modifier.testTag("discover-home")) { Icon(Icons.Rounded.ArrowForward, "Back to home") }
                 Spacer(Modifier.height(8.dp))

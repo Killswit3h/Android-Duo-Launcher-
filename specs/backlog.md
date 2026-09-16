@@ -32,8 +32,61 @@ Recorded so nobody re-researches them. Sources are in `specs/01-research-brief.m
 ## Required before inspection (not deferred — tracked here so they are not forgotten)
 
 - **FR-77 is not enforced end to end.** The security review found `PrivateSpaceGate` has zero consumers in main source apart from badges. Until the gate is wired into the App Library, the search providers, `SuggestionExclusions.isPrivateSpaceLocked` and Home item filtering, a locked private space's apps remain visible in those surfaces. This is a blocking correctness item, not a polish item.
-- **FR-49 is not enforced for pin requests.** `DuoPinRequests.layoutLock` and `.unlock` are registered nowhere, so a locked Home layout does not actually refuse an incoming pin request. The schema-9 task owns that wiring.
+- ~~**FR-49 is not enforced for pin requests.**~~ **Corrected.** The security review's "registered nowhere" finding was stale: `LauncherModel.init` already registered all three hooks and retracts them identity-checked in `onCleared`. Verified by `HomeLayoutLockTest`. Schema 9 additionally found and fixed a real gap the review missed — FR-49 gated drag, auto-add and pin but *not* remove, which mattered because the App Library sheet toggles a pin without going through Edit mode.
+- **FR-49 has a cold-start hole.** `PinItemActivity` can start the process without `LauncherModel` ever being constructed, so the lock hook is null and "absent lock reads as unlocked" lets a pin through on a locked layout. Fix is a persisted-settings fallback: a `lockLayout(context)` reader on `LauncherStateSnapshot` plus one line in `PinItemActivity`.
+- **Schema 9 validates more strictly than schema 8 did in one place:** it rejects a widget overlapping an occupied cell on ordinary pages, where v8 only checked the leading page. It fails safe (nothing is overwritten, the v8 payload stays on disk) but a user hitting it sees an empty Home with "Saved Home layout could not be read". Traced as unreachable through the legacy migration paths and the v8 editor, but this is the one case where the upgrade is stricter, so it needs an on-device upgrade test against a real 0.15.0-beta01 profile before release.
 - **Verify the private-space and lock wiring with tests that fail without it**, since both gaps were invisible to a green build and a passing suite.
+
+## Integration gaps found by actually running the app (2026-09-16, emulator, unfolded 851dp)
+
+Every one of these passed the build and the unit suite. They are wiring gaps, not implementation
+gaps: the components exist, are tested, and are simply not connected to anything.
+
+- **Home tiles do not use the icon pipeline.** Icons render as raw app drawables — square tiles with
+  drop shadows — so no appearance (Default/Dark/Clear/Tinted), no shape mask, no monochrome
+  fallback, no badges. `IconTile.kt` exists; `HomeGrid` is still drawing the old tile.
+- **Nothing hosts the Today View.** The left half of the unfolded screen is empty wallpaper, so the
+  iPhone Duo two-page spread — the single most recognisable thing about this design — does not
+  happen. `TodayView` is fully parameter-driven and needs a host.
+- **The leading page still opens Google Discover** regardless of `LeadingPageKind`, so FR-36's
+  fresh-install default of Today View is not honoured at runtime.
+- **The startup crash proves the coverage gap.** 763 unit tests passed while the launcher could not
+  reach its first frame. Nothing in the suite composes, so nothing in the suite can catch an init
+  order bug, a missing host, or an unwired setting. The instrumented suite and a real launch are
+  the only checks that would have.
+
+- **Restore applies only part of a backup.** `applyImportedLayout` consumes the active layout plus a
+  handful of legacy fields, so a v3 import silently ignores the other two layouts, the imported grid,
+  dock side and capacity, leading page and Today items, stacks, hidden apps, icon overrides and the
+  entire settings block. The codec round-trips all of it (proven by test); the model does not apply
+  it. The fix is local — consume those fields inside the single state commit `applyImportedLayout`
+  already performs, and widen its undo snapshot — and must stay atomic, never partially applied.
+- **The Settings screen is unreachable.** `home/HomeSheets.kt` still routes the settings sheet to the
+  old customization sheet, so FR-80 is unmet from the UI even though the screen exists and is tested.
+  FR-80's launcher entry additionally needs an `activity-alias` plus MainActivity routing.
+
+**Conclusion for the build plan:** a dedicated integration pass is required before inspection —
+hosting Today View, App Library and Search; driving Home tiles through the icon renderer; wiring the
+schema-9 settings (glass level, icon appearance, badge style, gestures, dock side, grid) into every
+surface; and wiring the private-space gate into library, search, suggestions and Home per FR-77.
+
+## Restore: residual risks raised by the restore-wiring work
+
+- **Stacks can dangle after a legacy import.** A v1/v2 backup carries no stacks, so the user's
+  current ones are kept, but the active layout's widget placements are replaced — a stack can end up
+  referencing a slot that vanished or now holds a different widget. `validate()` checks neither
+  stack→placement nor `leadingPage.today`→slot coherence, so nothing catches it. Left deliberately
+  (a v2 backup must not rewrite what it never described); pruning dangling stacks on legacy import
+  is the real fix.
+- **`LayoutImportPreview`'s defaults are a trap.** `version` defaults to 3 while `layoutSet` and
+  `settings` default to empty, so a hand-built preview claims to carry schema-9 data it does not —
+  which would import an empty launcher. One construction site was fixed; the honest fix is a
+  `carriesSchema9` flag or defaulting `version` to 1.
+- **The SAF round trip is unverified.** Export → restore → undo through the real document picker,
+  and AC-66 end to end, are instrumented-only and have not been run on a device yet.
+- **Two deliberate behaviour changes for the inspector to sign off:** a v1/v2 import onto a
+  non-4×6 grid now reflows instead of corrupting, and an import whose merge fails validation is now
+  refused with a message where it previously applied and surfaced later as a recovery banner.
 
 ## Security hardening deferred with a deliberate decision
 

@@ -6,15 +6,23 @@ import android.os.Bundle
 import android.os.UserManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Widgets
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -24,7 +32,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.jake.duolauncher.DuoAppearanceRuntime
+import com.jake.duolauncher.DuoTheme
+import com.jake.duolauncher.design.DuoTokens
+import com.jake.duolauncher.design.GlassLevel
+import com.jake.duolauncher.design.GlassSurface
+import com.jake.duolauncher.design.currentDuoColors
 
 private const val STATE_HANDLED = "duo.pin.handled"
 private const val MAX_PIN_LABEL_CHARS = 120
@@ -56,8 +71,8 @@ private const val MAX_PIN_LABEL_CHARS = 120
  * about. Labels drawn here come from the request's own `ShortcutInfo`/`AppWidgetProviderInfo`, are
  * rendered as text only, and are length-capped.
  *
- * The UI is intentionally plain; a later task restyles it as a glass sheet without touching any of
- * the above.
+ * [PinItemSheet] is the glass presentation of that decision (FR-28). It is only a visual layer: it
+ * receives an already-vetted kind and an already-capped label, and it can do nothing but call back.
  */
 class PinItemActivity : ComponentActivity() {
 
@@ -99,10 +114,11 @@ class PinItemActivity : ComponentActivity() {
         val startedLocked = decision is PinRequestDecision.Locked
 
         setContent {
-            MaterialTheme {
+            DuoTheme(DuoAppearanceRuntime.dark) {
                 var locked by remember { mutableStateOf(startedLocked) }
                 PinItemSheet(
                     label = label,
+                    kind = kind,
                     locked = locked,
                     onConfirm = {
                         accept()
@@ -194,44 +210,94 @@ class PinItemActivity : ComponentActivity() {
     }
 }
 
+/**
+ * The confirmation sheet (FR-28): a Liquid Glass panel with a preview, **Add** and **Cancel**.
+ *
+ * The preview is drawn from [kind] — the request type the platform reported — and never from
+ * artwork the requesting app supplies, so a hostile caller cannot hand this sheet a drawable to
+ * decode. [label] has already been trimmed and length-capped by the activity, and is rendered as
+ * text only.
+ */
 @Composable
 private fun PinItemSheet(
     label: String,
+    kind: PinItemKind,
     locked: Boolean,
     onConfirm: () -> Unit,
     onUnlockAndAdd: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Surface(
-            modifier = Modifier.fillMaxWidth().padding(24.dp),
-            shape = MaterialTheme.shapes.large,
-            tonalElevation = 3.dp,
+    val colors = currentDuoColors()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colors.scrim.copy(alpha = SHEET_SCRIM))
+            .padding(DuoTokens.space.xxl),
+        contentAlignment = Alignment.Center,
+    ) {
+        GlassSurface(
+            level = GlassLevel.PANEL,
+            shape = DuoTokens.radius.sheet,
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            Column(modifier = Modifier.padding(24.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(DuoTokens.space.xxl),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(PREVIEW_SIZE)
+                        .background(
+                            colors.glassTint.copy(alpha = PREVIEW_FILL),
+                            DuoTokens.radius.iconRadiusFor(PREVIEW_SIZE),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (kind == PinItemKind.SHORTCUT) Icons.Rounded.Bolt else Icons.Rounded.Widgets,
+                        contentDescription = null,
+                        tint = colors.label1,
+                        modifier = Modifier.size(PREVIEW_GLYPH),
+                    )
+                }
+                Spacer(Modifier.height(DuoTokens.space.lg))
                 Text(
                     text = if (locked) "Home layout is locked" else "Add to Home?",
-                    style = MaterialTheme.typography.titleLarge,
+                    style = DuoTokens.type.title3,
+                    color = colors.label1,
                 )
+                Spacer(Modifier.height(DuoTokens.space.sm))
                 Text(
                     text = if (locked) {
                         "Unlock Home layout to add $label."
                     } else {
                         "$label wants a place on your Home screen."
                     },
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 8.dp),
+                    style = DuoTokens.type.footnote,
+                    color = colors.label2,
+                    textAlign = TextAlign.Center,
                 )
+                Spacer(Modifier.height(DuoTokens.space.xl))
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                    horizontalArrangement = Arrangement.End,
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(DuoTokens.space.md),
                 ) {
-                    TextButton(onClick = onCancel) { Text("Cancel") }
-                    TextButton(onClick = if (locked) onUnlockAndAdd else onConfirm) {
-                        Text(if (locked) "Unlock and add" else "Add")
-                    }
+                    TextButton(
+                        onClick = onCancel,
+                        modifier = Modifier.weight(1f).heightIn(min = MIN_TARGET),
+                    ) { Text("Cancel") }
+                    Button(
+                        onClick = if (locked) onUnlockAndAdd else onConfirm,
+                        modifier = Modifier.weight(1f).heightIn(min = MIN_TARGET),
+                    ) { Text(if (locked) "Unlock and add" else "Add") }
                 }
             }
         }
     }
 }
+
+private const val SHEET_SCRIM = 0.4f
+private const val PREVIEW_FILL = 0.5f
+private val PREVIEW_SIZE = 64.dp
+private val PREVIEW_GLYPH = 32.dp
+private val MIN_TARGET = 48.dp

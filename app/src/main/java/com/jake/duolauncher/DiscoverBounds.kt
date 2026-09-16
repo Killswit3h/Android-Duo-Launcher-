@@ -10,7 +10,6 @@ import android.view.WindowMetrics
 import androidx.window.WindowSdkExtensions
 import androidx.window.embedding.ActivityEmbeddingController
 import java.lang.reflect.Proxy
-import org.json.JSONObject
 
 /** Optional adapter to the device's Window Extensions 8+ activity-stack API.
  * AndroidX 1.5 exposes this only internally, so resolve the public extension interface at runtime
@@ -33,10 +32,8 @@ internal object DiscoverBounds {
         ActivityEmbeddingController.getInstance(context).invalidateVisibleActivityStacks()
     }
 
-    fun dockWidth(context: Context, widthDp: Float): Float = runCatching {
-        JSONObject(context.getSharedPreferences("launcher", 0).getString("state", "{}") ?: "{}")
-            .optJSONObject(if (widthDp >= 650f) "expanded" else "compact")?.optDouble("dockWidth", 68.0)?.toFloat()
-    }.getOrNull()?.coerceIn(56f, 84f) ?: 68f
+    fun dockWidth(context: Context, widthDp: Float): Float =
+        LauncherStateSnapshot.dockWidth(context, widthDp)
 
     fun initialize(context: Context) {
         if (WindowSdkExtensions.getInstance().extensionVersion < 8) return
@@ -67,7 +64,7 @@ internal object DiscoverBounds {
                             val configuration = getConfig.invoke(parent) as Configuration
                             val d = configuration.densityDpi / 160f
                             val dock = dockWidth(context, metrics.bounds.width() / d)
-                            val vertical = runCatching { JSONObject(context.getSharedPreferences("launcher", 0).getString("state", "{}") ?: "{}").optBoolean("verticalStatus", true) }.getOrDefault(true)
+                            val vertical = LauncherStateSnapshot.verticalStatus(context)
                             val types = WindowInsets.Type.displayCutout() or WindowInsets.Type.navigationBars() or
                                 (if (vertical) 0 else WindowInsets.Type.statusBars())
                             val insets = metrics.windowInsets.getInsetsIgnoringVisibility(types)

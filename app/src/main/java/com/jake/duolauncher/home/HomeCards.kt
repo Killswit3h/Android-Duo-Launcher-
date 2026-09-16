@@ -1,6 +1,5 @@
 package com.jake.duolauncher.home
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,35 +10,44 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Widgets
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.jake.duolauncher.Glass
+import com.jake.duolauncher.design.DuoTokens
+import com.jake.duolauncher.design.GlassLevel
+import com.jake.duolauncher.design.GlassSurface
+import com.jake.duolauncher.design.currentDuoColors
 import kotlinx.coroutines.delay
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+/**
+ * A built-in card's glass backing (FR-2). The lightest glass level, so the card's own content leads
+ * rather than the material it sits on.
+ */
 @Composable
 internal fun GlassCard(modifier: Modifier = Modifier, onClick: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
-    Surface(modifier.fillMaxSize().clip(RoundedCornerShape(24.dp)).clickable(onClick = onClick),
-        color = Glass.copy(alpha = .24f), shape = RoundedCornerShape(24.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .18f))) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.SpaceBetween, content = content)
+    GlassSurface(
+        level = GlassLevel.WIDGET,
+        shape = DuoTokens.radius.widget,
+        modifier = modifier.fillMaxSize().clip(DuoTokens.radius.widget).clickable(onClick = onClick),
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(DuoTokens.space.md),
+            verticalArrangement = Arrangement.SpaceBetween,
+            content = content,
+        )
     }
 }
 
@@ -51,41 +59,49 @@ internal fun currentTime(): LocalDateTime {
 
 @Composable
 internal fun ClockCard(onClick: () -> Unit) {
+    val colors = currentDuoColors()
     val time = currentTime()
     val format = if (android.text.format.DateFormat.is24HourFormat(LocalContext.current)) "HH:mm" else "h:mm"
     GlassCard(onClick = onClick) {
-        Icon(Icons.Rounded.Schedule, "Clock widget; tap to replace", tint = Color.White, modifier = Modifier.size(20.dp))
-        Text(time.format(DateTimeFormatter.ofPattern(format)), color = Color.White, fontWeight = FontWeight.Light, fontSize = 30.sp, maxLines = 1)
-        Text("Local time", color = Color.White.copy(alpha = .8f), fontSize = 11.sp)
+        Icon(Icons.Rounded.Schedule, "Clock widget; tap to replace", tint = colors.label1, modifier = Modifier.size(20.dp))
+        Text(time.format(DateTimeFormatter.ofPattern(format)), style = DuoTokens.type.clockLarge,
+            color = colors.label1, maxLines = 1)
+        Text("Local time", style = DuoTokens.type.caption1, color = colors.label2)
     }
 }
 
 @Composable
 internal fun DateCard(onClick: () -> Unit) {
+    val colors = currentDuoColors()
     val date = currentTime()
     GlassCard(onClick = onClick) {
-        Text(date.format(DateTimeFormatter.ofPattern("EEEE")), color = Color.White, fontSize = 12.sp, maxLines = 1)
-        Text(date.dayOfMonth.toString(), color = Color.White, fontWeight = FontWeight.Light, fontSize = 40.sp, lineHeight = 42.sp)
-        Text(date.format(DateTimeFormatter.ofPattern("MMMM")), color = Color.White.copy(alpha = .8f), fontSize = 12.sp)
+        Text(date.format(DateTimeFormatter.ofPattern("EEEE")), style = DuoTokens.type.caption1, color = colors.label1, maxLines = 1)
+        Text(date.dayOfMonth.toString(), style = DuoTokens.type.clockLarge, color = colors.label1)
+        Text(date.format(DateTimeFormatter.ofPattern("MMMM")), style = DuoTokens.type.caption1, color = colors.label2)
     }
 }
 
 @Composable
 internal fun ExpandedCard(onClick: () -> Unit) {
+    val colors = currentDuoColors()
     val date = currentTime()
     GlassCard(onClick = onClick) {
         Column {
-            Text(date.format(DateTimeFormatter.ofPattern("EEEE")), color = Color.White, fontSize = 22.sp)
-            Text(date.format(DateTimeFormatter.ofPattern("MMMM d")), color = Color.White.copy(alpha = .8f), fontSize = 16.sp)
+            Text(date.format(DateTimeFormatter.ofPattern("EEEE")), style = DuoTokens.type.title2, color = colors.label1)
+            Text(date.format(DateTimeFormatter.ofPattern("MMMM d")), style = DuoTokens.type.body, color = colors.label2)
         }
         Column {
-            Icon(Icons.Rounded.Widgets, null, tint = Color.White, modifier = Modifier.size(32.dp))
-            Spacer(Modifier.height(16.dp))
-            Text("A little more room.", color = Color.White, fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.Light)
-            Spacer(Modifier.height(12.dp))
-            Text("Add a calendar, photos, or another widget.", color = Color.White.copy(alpha = .85f), fontSize = 14.sp)
-            Spacer(Modifier.height(20.dp))
-            FilledTonalButton(onClick = onClick) { Icon(Icons.Rounded.Add, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Add widget") }
+            Icon(Icons.Rounded.Widgets, null, tint = colors.label1, modifier = Modifier.size(32.dp))
+            Spacer(Modifier.height(DuoTokens.space.lg))
+            Text("A little more room.", style = DuoTokens.type.title1, color = colors.label1)
+            Spacer(Modifier.height(DuoTokens.space.md))
+            Text("Add a calendar, photos, or another widget.", style = DuoTokens.type.footnote, color = colors.label2)
+            Spacer(Modifier.height(DuoTokens.space.xl))
+            FilledTonalButton(onClick = onClick) {
+                Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(DuoTokens.space.sm))
+                Text("Add widget")
+            }
         }
     }
 }

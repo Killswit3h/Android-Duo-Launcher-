@@ -23,6 +23,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.jake.duolauncher.design.DuoTokens
+import com.jake.duolauncher.design.GlassLevel
+import com.jake.duolauncher.design.GlassSurface
+import com.jake.duolauncher.design.currentDuoColors
 
 @Composable
 internal fun FolderPanel(
@@ -37,7 +41,8 @@ internal fun FolderPanel(
         drag.activeSourceScope = folder.id
         onDispose { if (drag.activeSourceScope == folder.id) drag.activeSourceScope = null }
     }
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .28f))
+    val colors = currentDuoColors()
+    Box(Modifier.fillMaxSize().background(colors.scrim.copy(alpha = .28f))
         .clickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
@@ -46,15 +51,15 @@ internal fun FolderPanel(
         )
         .imePadding().testTag("folder-panel"),
         contentAlignment = Alignment.Center) {
-        Surface(Modifier.fillMaxWidth(.9f).fillMaxHeight(.82f).heightIn(min = 260.dp, max = 620.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
-            )
-            .testTag("folder-panel-content"),
-            color = Glass.copy(alpha = .97f), shape = RoundedCornerShape(30.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .6f))) {
+        // FR-2: the folder panel is a Liquid Glass surface over the shared blurred wallpaper.
+        GlassSurface(level = GlassLevel.PANEL, shape = DuoTokens.radius.folder,
+            modifier = Modifier.fillMaxWidth(.9f).fillMaxHeight(.82f).heightIn(min = 260.dp, max = 620.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .testTag("folder-panel-content")) {
             Column(Modifier.padding(18.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(title, { title = it }, Modifier.weight(1f).testTag("folder-name"),
@@ -81,7 +86,8 @@ private fun FolderChild(
     onLaunch: (AppEntry, android.graphics.Rect?) -> Unit, onMoveOut: (String, DropTarget) -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
-    Surface(Modifier.fillMaxWidth().testTag("folder-child-${app.id}"), color = Color.White.copy(alpha = .34f),
+    Surface(Modifier.fillMaxWidth().testTag("folder-child-${app.id}"),
+        color = currentDuoColors().glassTint.copy(alpha = .34f),
         shape = RoundedCornerShape(18.dp)) {
         Box {
             Column(Modifier.fillMaxWidth().dropRegion(drag, DropTarget.Library(app.id), app.id, page,

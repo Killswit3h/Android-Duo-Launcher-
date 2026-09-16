@@ -10,6 +10,16 @@
     <style name="Theme.Duo.Discover" parent="Theme.Duo">
         <item name="android:windowDisablePreview">true</item>
     </style>
+    <!-- The pin-request confirmation sheet (FR-28): a translucent overlay over whatever is behind
+         it, so it reads as a sheet rather than a full screen. A later task restyles the sheet's
+         contents as Liquid Glass; the window itself already composites correctly for that. -->
+    <style name="Theme.Duo.PinItem" parent="Theme.Duo">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowCloseOnTouchOutside">true</item>
+    </style>
     <style name="Theme.Duo.LiveDiscover" parent="Theme.Duo.Discover">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>

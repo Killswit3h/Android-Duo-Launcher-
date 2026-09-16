@@ -29,6 +29,7 @@ import androidx.core.content.ContextCompat
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
+import com.jake.duolauncher.shortcuts.DuoShortcuts
 
 class MainActivity : ComponentActivity() {
     private val model: LauncherModel by viewModels()
@@ -148,6 +149,8 @@ class MainActivity : ComponentActivity() {
             it.postOnAnimation { if (DiscoverSession.host.get() === discover) DiscoverSession.dismiss() }
         }
         model.refresh(); appearance.refresh(systemDark()); updateDefaultHome()
+        // Shortcut host permission follows the Home role, which the user can change outside Duo.
+        DuoShortcuts.repository(this).refreshHostPermission()
         window.decorView.post {
             if (!isFinishing && !isDestroyed && !LiveDiscover.viewport.isEmpty)
                 LiveDiscover.prepare(this, LiveDiscover.viewport, LiveDiscover.pageWidth)

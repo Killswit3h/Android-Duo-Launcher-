@@ -164,6 +164,26 @@ a well-meaning gesture fix before, so re-run the whole section after any change 
 | 8.12 | Tap to leave Edit mode | Tap empty background in Edit mode | Edit mode exits (FR-48) | |
 | 8.13 | Discover overscroll is gated | Leading page set to Today, overscroll left from Home 1 | Today, not Google Discover (FR-55) | |
 
+## 8b. Changes made without a device (this branch)
+
+Each of these passed build, unit tests and lint in CI but has never run on hardware. The rows say
+what to look at, because a green suite says nothing about any of them.
+
+| # | Check | How | Expect | Result |
+|---|---|---|---|---|
+| 8b.1 | Clocks still tick every minute | Home, Today View clock, and the Dune live wallpaper, all visible. Wait through two minute boundaries | All three update. The three ad-hoc TIME_TICK receivers were consolidated onto the shared `DuoTicker`, so a mistake here stops the clock rather than crashing | |
+| 8b.2 | The ticker releases | Leave Duo, then `adb shell dumpsys activity broadcasts \| grep -i duolauncher` | No TIME_TICK registration survives once nothing is subscribed | |
+| 8b.3 | Wallpaper repaints on a theme change | Dune wallpaper visible, switch system dark mode | Repaints. This is the `ACTION_CONFIGURATION_CHANGED` receiver kept separate from the ticker | |
+| 8b.4 | Pin sheet rejects obscured touches | With an app holding SYSTEM_ALERT_WINDOW drawing an overlay, trigger a pin request and tap **Add** | The tap is dropped, nothing is pinned | |
+| 8b.5 | Pin sheet on a cold start with a locked layout | Lock Home layout, force-stop Duo, then trigger a pin request from another app | Sheet says the layout is locked and offers **Unlock and add**, which cannot succeed without the model. Nothing is pinned | |
+| 8b.6 | Pin sheet on a cold start with an unlocked layout | Same, layout unlocked | Ordinary **Add to Home?** sheet, and the pin lands | |
+| 8b.7 | Uninstall still works | Long-press a user-installed app, **Uninstall** | Android's own uninstall confirmation appears. The handler is now required to be a system app | |
+| 8b.8 | Uninstall from a work profile | Same from a badged work app | Targets the work copy, not the personal one | |
+| 8b.9 | Stacks survive a restart | Create a widget stack, force-stop, relaunch | The stack is still a stack, showing the same widget it was showing | |
+| 8b.10 | Removing a stacked widget | Remove one widget from a two-widget stack | FR-64: the stack becomes a plain widget. The remaining widget stays put | |
+| 8b.11 | Upgrading with a stack already on disk | Install over a build that had a stack whose widget was later removed | Home loads. The dangling stack is pruned silently, not reported as a corrupt layout | |
+| 8b.12 | Restoring a v1/v2 backup over current stacks | Restore a legacy backup while stacks exist | Restore succeeds, stacks that no longer name a widget are gone, and undo puts everything back | |
+
 ## 9. Display and accessibility on hardware
 
 | # | Check | How | Expect | Result |

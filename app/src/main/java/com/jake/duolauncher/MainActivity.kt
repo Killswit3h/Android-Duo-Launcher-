@@ -26,12 +26,12 @@ import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.CancellationSignal
 import androidx.core.content.ContextCompat
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.IntentFilter
 import com.jake.duolauncher.badges.NotificationAccess
 import com.jake.duolauncher.home.DuoHost
 import com.jake.duolauncher.shortcuts.DuoShortcuts
+import com.jake.duolauncher.today.builtin.DuoTicker
+import com.jake.duolauncher.today.builtin.TickSubscription
 import com.jake.duolauncher.today.builtin.TodayFeeds
 
 class MainActivity : ComponentActivity() {
@@ -76,10 +76,15 @@ class MainActivity : ComponentActivity() {
     private var appearanceLocationGeneration = 0
     private var appearancePermissionGeneration = -1
     private var appearanceLocationCancellation: CancellationSignal? = null
-    private var timeReceiverRegistered = false
-    private val timeReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) { appearance.refresh(systemDark()) }
-    }
+    /**
+     * The wall-clock subscription, held only while started.
+     *
+     * This used to be a third ad-hoc TIME_TICK receiver alongside the ones in `Appearance.kt` and
+     * `DuneWallpaper.kt`. All three registered the same four actions, so all three now hang off the
+     * shared [DuoTicker]: one registration for the process instead of one per surface, released
+     * when the last subscriber leaves.
+     */
+    private var timeTick: TickSubscription? = null
     private val locationPermission = activityResultRegistry.register("duo.appearance.location", this,
         ActivityResultContracts.RequestPermission(), permissionResult@{ granted ->
         if (appearancePermissionGeneration != appearanceLocationGeneration || isDestroyed) return@permissionResult
@@ -147,19 +152,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart(); widgets.host.startListening()
-        if (!timeReceiverRegistered) {
-            ContextCompat.registerReceiver(this, timeReceiver, IntentFilter().apply {
-                addAction(Intent.ACTION_TIME_TICK); addAction(Intent.ACTION_TIME_CHANGED)
-                addAction(Intent.ACTION_TIMEZONE_CHANGED); addAction(Intent.ACTION_DATE_CHANGED)
-            }, ContextCompat.RECEIVER_NOT_EXPORTED)
-            timeReceiverRegistered = true
-        }
+        if (timeTick == null) timeTick = DuoTicker.of(this).subscribe { appearance.refresh(systemDark()) }
         appearance.refresh(systemDark())
     }
     override fun onStop() {
         // The process may be killed after this, so write any debounced layout edit now.
         model.flushPersistence()
-        if (timeReceiverRegistered) { unregisterReceiver(timeReceiver); timeReceiverRegistered = false }
+        timeTick?.cancel(); timeTick = null
         widgets.host.stopListening(); super.onStop()
     }
     override fun onDestroy() {

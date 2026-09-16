@@ -4,6 +4,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Uninstall hand-off from the app context menu (FR-29). Normal permission: it only lets Duo
+         ask Android to show its own uninstall confirmation; Duo never removes anything itself. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Private space container in the App Library (FR-76..FR-78). Android grants this only to the
+         default Home app; without the role Duo reports the profile as unsupported and shows nothing. -->
+    <uses-permission android:name="android.permission.ACCESS_HIDDEN_PROFILES" />
     <queries>
         <package android:name="com.google.android.googlequicksearchbox" />
         <intent>
@@ -23,6 +29,23 @@
         <activity android:name=".DiscoverFeedActivity" android:theme="@style/Theme.Duo.Discover" android:exported="false" android:resizeableActivity="true" />
         <activity android:name=".LiveDiscoverActivity" android:theme="@style/Theme.Duo.LiveDiscover"
             android:exported="false" android:resizeableActivity="true" />
+        <!--
+            Pin-request confirmation (FR-28). Exported because the system starts it, which is the
+            only caller that can produce a genuine request: the activity accepts nothing except a
+            LauncherApps.getPinItemRequest(intent) result and never executes a caller intent
+            (NFR-S6). Its own taskAffinity keeps it out of the Home task.
+        -->
+        <activity android:name=".shortcuts.PinItemActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Duo.PinItem"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.jake.duolauncher.pinitem">
+            <intent-filter>
+                <action android:name="android.content.pm.action.CONFIRM_PIN_SHORTCUT" />
+                <action android:name="android.content.pm.action.CONFIRM_PIN_APPWIDGET" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <service android:name=".DuneWallpaperService" android:label="Duo dunes"
             android:permission="android.permission.BIND_WALLPAPER" android:exported="true">
             <intent-filter><action android:name="android.service.wallpaper.WallpaperService" /></intent-filter>

@@ -23,6 +23,13 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.jake.duolauncher.badges.DuoBadges
+import com.jake.duolauncher.design.BlurBackdrop
+import com.jake.duolauncher.design.LocalDuoBackdrop
+import com.jake.duolauncher.design.LocalGlassLevel
+import com.jake.duolauncher.design.LocalReduceTransparency
+import com.jake.duolauncher.design.rememberDuoBackdrop
 import com.jake.duolauncher.home.*
 
 internal val Ink: Color
@@ -60,6 +67,13 @@ fun LauncherScreen(
     showFirstRun: Boolean = false,
     onFinishFirstRun: () -> Unit = {},
     onShadeSetup: () -> Unit = {},
+    /**
+     * Icon appearance, badges, labels and the Glass slider (FR-5, FR-14 to FR-17, FR-20).
+     *
+     * This is the single seam the schema-9 settings task writes to: build it from the persisted
+     * settings block and every Home surface follows. The default reproduces today's look.
+     */
+    homeAppearance: HomeAppearance = HomeAppearance(labels = state.labels),
 ) {
     val sheetState = rememberSaveable { mutableStateOf("") }
     var sheet by sheetState
@@ -286,6 +300,12 @@ fun LauncherScreen(
         }
     }
 
+    val backdrop = rememberDuoBackdrop()
+    val launcherContext = androidx.compose.ui.platform.LocalContext.current
+    val iconRenderer = remember(launcherContext) { DuoIcons.renderer(launcherContext) }
+    val badgeRepository = remember(launcherContext) { DuoBadges.repository(launcherContext) }
+    // One collector for the whole tree; tiles read the map, never a flow of their own.
+    val badges by badgeRepository.badges.collectAsStateWithLifecycle()
     val homeLayer = rememberGraphicsLayer()
     DisposableEffect(homeLayer) {
         homeLayer.compositingStrategy = androidx.compose.ui.graphics.layer.CompositingStrategy.Offscreen
@@ -307,7 +327,17 @@ fun LauncherScreen(
             }
         },
         onFinish = { cancelled -> finishDrag(cancelled) })) {
-        DuneWallpaper()
+        // ADR-3 / NFR-P6: the wallpaper is captured into ONE blurred layer that every GlassSurface
+        // samples. Only the wallpaper is inside the source, so glass never blurs itself.
+        BlurBackdrop(Modifier.fillMaxSize(), backdrop) { DuneWallpaper() }
+        CompositionLocalProvider(
+            LocalDuoBackdrop provides backdrop,
+            LocalGlassLevel provides homeAppearance.glass,
+            LocalReduceTransparency provides homeAppearance.reduceTransparency,
+            LocalHomeAppearance provides homeAppearance,
+            LocalIconRenderer provides iconRenderer,
+            LocalBadges provides if (homeAppearance.badgesEnabled) badges else emptyMap(),
+        ) {
         HomeWorkspace(
             state = state, model = model, widgets = widgets, drag = drag, pager = pager,
             nativePager = nativePager, pageGestures = pageGestures, pageFling = pageFling,
@@ -337,5 +367,6 @@ fun LauncherScreen(
             createFolderFirstIdState = createFolderFirstIdState,
             expandedWorkspaceState = expandedWorkspaceState,
         )
+        }
     }
 }

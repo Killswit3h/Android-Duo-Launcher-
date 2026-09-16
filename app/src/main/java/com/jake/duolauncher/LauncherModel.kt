@@ -9,8 +9,16 @@ import android.os.Process
 import android.os.UserHandle
 import android.os.UserManager
 import androidx.lifecycle.AndroidViewModel
+import com.jake.duolauncher.icons.IconAppearance
 import com.jake.duolauncher.icons.IconRasterizer
+import com.jake.duolauncher.icons.IconShape
 import com.jake.duolauncher.icons.IconStyle
+import com.jake.duolauncher.shortcuts.DuoPinRequests
+import com.jake.duolauncher.shortcuts.HomeLayoutLock
+import com.jake.duolauncher.shortcuts.HomeLayoutUnlock
+import com.jake.duolauncher.shortcuts.PinItemKind
+import com.jake.duolauncher.shortcuts.PinnedItem
+import com.jake.duolauncher.shortcuts.PinnedItemPlacer
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +45,16 @@ data class AppEntry(
     val packageName: String get() = component.packageName
 }
 
+/**
+ * The observable launcher state.
+ *
+ * The flat placement fields (`homeSlots`, `leadingSlots`, `dock`, `widgetPlacements`, …) are the
+ * **active** layout — whichever of mirrored/cover/inner the current posture and layout mode select.
+ * They are kept because the whole editing layer, the Compose UI and the existing tests are written
+ * against them. [layoutSet] is the full schema-9 record that holds all three layouts, and it is the
+ * source of truth: the flat fields are re-derived from it on every change so the two can never
+ * drift apart.
+ */
 data class LauncherState(
     val apps: List<AppEntry> = emptyList(),
     val profiles: List<AppProfile> = emptyList(),
@@ -55,11 +73,31 @@ data class LauncherState(
     val verticalStatus: Boolean = true,
     val loading: Boolean = true,
     val error: String? = null,
+    // ----- schema 9 -----
+    val layoutSet: LayoutSet = LayoutSet(),
+    /** The active layout's grid (FR-31). */
+    val grid: GridSpec = DEFAULT_GRID,
+    /** True while the inner display is the active one, which selects the inner layout. */
+    val expandedActive: Boolean = false,
+    val leadingPage: LeadingPageConfig = LeadingPageConfig(),
+    val stacks: List<WidgetStack> = emptyList(),
+    val hiddenApps: Set<String> = emptySet(),
+    val iconOverrides: List<IconOverrideRecord> = emptyList(),
+    val settings: DuoSettings = DuoSettings(),
 ) {
     val order: List<String> get() = homeSlots.filterNotNull()
     val widgets: List<Int> get() = layout.widgets
-    val layout: HomeLayout get() = HomeLayout(homeSlots, dock, widgetPlacements, folders, widgetRestores, leadingSlots)
+    val layout: HomeLayout get() = HomeLayout(homeSlots, dock, widgetPlacements, folders, widgetRestores, leadingSlots, grid)
     val homePages get() = layout.pageCount
+
+    /** Which stored layout the current posture and mode select. */
+    val activeTarget: LayoutTarget get() = layoutSet.targetFor(expandedActive)
+
+    /** Apps hidden from every surface (FR-75). */
+    fun isHidden(appId: String) = appId in hiddenApps
+
+    /** FR-49. */
+    val layoutLocked: Boolean get() = settings.lockLayout
 }
 
 class LauncherModel(application: Application) : AndroidViewModel(application) {
@@ -71,10 +109,18 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     private val launcherApps = application.getSystemService(LauncherApps::class.java)
     private val userManager = application.getSystemService(UserManager::class.java)
     private val appCatalogPrefs = application.getSharedPreferences("app_catalog", 0)
-    private val legacyRaw = prefs.getString("state", null)
-    private val sourceSchema = runCatching { JSONObject(legacyRaw ?: "{}").optInt("schema", 1) }.getOrDefault(1)
+    private val legacyRaw = prefs.getString(STATE_KEY, null)
+    private val sourceSchema = runCatching {
+        (DuoJson.parse(legacyRaw ?: "{}") as? DuoJson.Obj)?.int("schema", 1) ?: 1
+    }.getOrDefault(1)
     private var needsMigration = sourceSchema < 2
     private var statePayloadInvalid = false
+
+    /**
+     * The last payload known to decode cleanly. It becomes `state_v9_previous` on the next write,
+     * which is the first place recovery looks (error table: "Schema 9 load fails validation").
+     */
+    private var lastGoodPayload: String? = null
     private val mutable = MutableStateFlow(load())
     val state = mutable.asStateFlow()
     // An edit arms a 150 ms debounce; the serialization and disk write run on IO (NFR-P5).
@@ -83,7 +129,7 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         scheduler = CoroutinePersistenceScheduler(viewModelScope, Dispatchers.IO),
         serialize = ::serializeState, write = ::writeState)
     private var persistRequested = false
-    private var undoLayout: Pair<HomeLayout, HomeLayout>? = null
+    private var undoLayout: Pair<LauncherState, LauncherState>? = null
     private var undoImportSettings: UndoImportSettings? = null
     private var refreshing = false
     private var refreshPending = false
@@ -93,6 +139,9 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     // Accessed only in the serialized IO refresh. Returning Home reuses existing bitmaps.
     private val iconCache = mutableMapOf<String, AppEntry>()
     private var iconConfiguration = ""
+
+    /** The page a pin request places onto (FR-28: "the current Home page"). Set by the UI. */
+    private var currentPage = 0
     internal var completedRefreshes = 0
         private set
     private val callback = object : LauncherApps.Callback() {
@@ -117,7 +166,18 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    init { launcherApps.registerCallback(callback); refresh() }
+    /** The seams the shortcuts track left for the layout owner (FR-28, FR-49). */
+    private val pinLock = HomeLayoutLock { mutable.value.settings.lockLayout }
+    private val pinUnlock = HomeLayoutUnlock { setLockLayout(false) }
+    private val pinPlacer = PinnedItemPlacer(::placePinnedItem)
+
+    init {
+        launcherApps.registerCallback(callback)
+        DuoPinRequests.layoutLock = pinLock
+        DuoPinRequests.unlock = pinUnlock
+        DuoPinRequests.placer = pinPlacer
+        refresh()
+    }
 
     fun refresh(invalidatedPackage: String? = null, user: UserHandle = Process.myUserHandle()) {
         invalidatedPackage?.let { invalidatedPackages += userManager.getSerialNumberForUser(user) to it }
@@ -190,37 +250,55 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
                         else cachedEntry.copy(user = profile?.let { p -> handles.firstOrNull { userManager.getSerialNumberForUser(it) == p.userSerial } } ?: personal,
                             profileLabel = profile?.label ?: cachedEntry.profileLabel, available = false)
                     }
+                    val knownBefore = cached.mapTo(mutableSetOf(), AppEntry::id)
                     val entries = (live + unavailable).distinctBy(AppEntry::id)
                         .sortedWith { a, b -> collator.compare(a.label, b.label) }
                     saveCachedApps(entries)
                     iconCache.keys.retainAll(entries.map { it.id }.toSet())
-                    RefreshedApps(entries, (profiles + unavailable.map { AppProfile(it.userSerial, it.profileLabel, false, true,
-                        quiet = true, unlocked = false, available = false) }).distinctBy(AppProfile::userSerial),
-                        authoritativeProfiles.toSet(), removedProfileSerials)
+                    Triple(
+                        RefreshedApps(entries, (profiles + unavailable.map { AppProfile(it.userSerial, it.profileLabel, false, true,
+                            quiet = true, unlocked = false, available = false) }).distinctBy(AppProfile::userSerial),
+                            authoritativeProfiles.toSet(), removedProfileSerials),
+                        knownBefore,
+                        liveIds,
+                    )
                 }
+                val refreshed = apps.first
+                val knownBefore = apps.second
                 mutable.update { old ->
-                    val entries = apps.entries
-                    val profiles = apps.profiles
+                    val entries = refreshed.entries
+                    val profiles = refreshed.profiles
                     // persistRequested covers the debounce window before "initialized" reaches disk.
-                    val dock = if (!persistRequested && !prefs.getBoolean("initialized", false)) initialDock(entries) else old.dock
+                    val freshInstall = !persistRequested && !prefs.getBoolean("initialized", false)
+                    val dock = if (freshInstall) initialDock(entries, old.layoutSet.dock.capacity) else old.dock
                     val installed = entries.map { it.id }
                     val legacyPins = if (needsMigration) migrateHomePins(old.order, installed, suggestedPins(entries, dock))
                         else old.homeSlots
                     val pins = if (sourceSchema < 6 && needsMigration) migrateSchema5Apps(legacyPins) else legacyPins
                     val availableIds = entries.mapTo(mutableSetOf(), AppEntry::id)
-                    val authoritative = apps.authoritativeProfiles
-                    val removedIds = removedAppIds(old.homeSlots.filterNotNull() + old.leadingSlots.filterNotNull() +
-                        old.dock.filterNotNull() + old.folders.flatMap { it.appIds }, availableIds,
+                    val authoritative = refreshed.authoritativeProfiles
+                    val everyPlacedId = old.layoutSet.let { set ->
+                        LayoutTarget.entries.flatMap { target ->
+                            val layout = set.layout(target)
+                            layout.slots.filterNotNull() + layout.leadingSlots.filterNotNull()
+                        }
+                    } + old.dock.filterNotNull() + old.folders.flatMap { it.appIds }
+                    val removedIds = removedAppIds(everyPlacedId, availableIds,
                         authoritative, temporarilyUnavailable, removed, userManager.getSerialNumberForUser(Process.myUserHandle()),
-                        apps.removedProfiles)
+                        refreshed.removedProfiles)
                     val validPins = pins.map { it?.takeUnless(removedIds::contains) }
                     val validDock = dock.map { it?.takeUnless(removedIds::contains) }
                     val reconciled = reconcileFolders(HomeLayout(validPins, validDock, old.widgetPlacements, old.folders,
-                        old.widgetRestores, old.leadingSlots), removedIds)
-                    old.copy(apps = entries, profiles = profiles, homeSlots = reconciled.slots, leadingSlots = reconciled.leadingSlots,
-                        dock = reconciled.dock, folders = reconciled.folders,
+                        old.widgetRestores, old.leadingSlots, old.grid), removedIds)
+                    // A removed app must also leave the layouts that are not currently on screen,
+                    // or it would reappear the moment the user switches posture or layout mode.
+                    val prunedSet = pruneInactiveLayouts(
+                        old.layoutSet.withHomeLayout(old.activeTarget, reconciled), old.activeTarget, removedIds)
+                    val autoAdded = if (freshInstall || !old.settings.autoAddApps) prunedSet
+                        else autoAddNewApps(prunedSet, old, entries, knownBefore, removedIds)
+                    old.withLayoutSet(autoAdded).copy(apps = entries, profiles = profiles,
                         canUndoEdit = old.canUndoEdit && old.layout == reconciled, loading = false,
-                        error = if (statePayloadInvalid) old.error else null)
+                        error = if (statePayloadInvalid) old.error else old.recoveryBanner())
                 }
                 if (needsMigration && legacyRaw != null && !prefs.contains("state_v1_backup"))
                     prefs.edit().putString("state_v1_backup", legacyRaw).apply()
@@ -234,6 +312,47 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
                 if (refreshPending) { refreshPending = false; refresh() }
             }
         }
+    }
+
+    /** The recovery banner survives a refresh so the user still sees it (error table). */
+    private fun LauncherState.recoveryBanner(): String? = error?.takeIf { it == RECOVERED_BANNER }
+
+    private fun pruneInactiveLayouts(set: LayoutSet, active: LayoutTarget, removedIds: Set<String>): LayoutSet {
+        if (removedIds.isEmpty()) return set
+        var result = set
+        LayoutTarget.entries.filterNot { it == active }.forEach { target ->
+            val layout = result.layout(target)
+            result = result.withLayout(target, layout.copy(
+                slots = layout.slots.map { it?.takeUnless(removedIds::contains) }.dropLastWhile { it == null },
+                leadingSlots = layout.leadingSlots.map { it?.takeUnless(removedIds::contains) },
+            ))
+        }
+        return result
+    }
+
+    /** FR-50: a newly installed app lands in the first free cell of the last page, or a new one. */
+    private fun autoAddNewApps(
+        set: LayoutSet,
+        old: LauncherState,
+        entries: List<AppEntry>,
+        knownBefore: Set<String>,
+        removedIds: Set<String>,
+    ): LayoutSet {
+        if (old.settings.lockLayout) return set
+        if (knownBefore.isEmpty()) return set
+        val placedAnywhere = LayoutTarget.entries.flatMap { target ->
+            val layout = set.layout(target)
+            layout.slots.filterNotNull() + layout.leadingSlots.filterNotNull()
+        }.toMutableSet()
+        placedAnywhere += set.dock.items.filterNotNull()
+        placedAnywhere += set.folders.flatMap { it.appIds }
+        val newcomers = entries.map { it.id }
+            .filter { it !in knownBefore && it !in placedAnywhere && it !in removedIds && it !in old.hiddenApps }
+        if (newcomers.isEmpty()) return set
+        val target = set.targetFor(old.expandedActive)
+        var layout = set.homeLayout(target)
+        newcomers.forEach { id -> layout = placeOnFirstFreeCell(layout, id, layout.pageCount - 1) ?: layout }
+        return set.withHomeLayout(target, layout)
     }
 
     private fun loadCachedApps(): List<AppEntry> = runCatching {
@@ -262,14 +381,15 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         appCatalogPrefs.edit().putString("apps", array.toString()).apply()
     }
 
-    private fun initialDock(apps: List<AppEntry>): List<String?> {
+    private fun initialDock(apps: List<AppEntry>, capacity: Int): List<String?> {
         val packages = listOf(
             listOf("com.samsung.android.dialer", "com.google.android.dialer"),
             listOf("com.android.chrome", "com.sec.android.app.sbrowser"),
             listOf("com.google.android.apps.messaging", "com.samsung.android.messaging"),
             listOf("com.spotify.music", "com.google.android.apps.youtube.music"),
         )
-        return packages.map { choices -> choices.firstNotNullOfOrNull { pkg -> apps.firstOrNull { !it.isWork && it.packageName == pkg }?.id } }
+        val chosen = packages.map { choices -> choices.firstNotNullOfOrNull { pkg -> apps.firstOrNull { !it.isWork && it.packageName == pkg }?.id } }
+        return List(capacity) { chosen.getOrNull(it) }
     }
 
     private fun suggestedPins(apps: List<AppEntry>, dock: List<String?>): List<String> {
@@ -296,14 +416,20 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
 
     fun setPinned(id: String, pinned: Boolean) {
         if (statePayloadInvalid) return
+        // FR-49: the App Library sheet can toggle a pin without going through Edit mode or a drag,
+        // so a locked layout has to be refused here too.
+        if (mutable.value.layoutLocked) return
         if (mutable.value.folders.any { id in it.appIds }) return
-        mutable.update { old ->
-            val enable = pinned && old.apps.any { it.id == id }
-            old.copy(homeSlots = if (enable && id in old.leadingSlots) old.homeSlots else pinHomeApp(old.homeSlots, id,
-                enable, old.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices() }.filterTo(mutableSetOf()) { it >= 0 }),
-                leadingSlots = if (enable) old.leadingSlots else old.leadingSlots.map { it?.takeUnless(id::equals) },
-                canUndoEdit = false)
+        val old = mutable.value
+        val enable = pinned && old.apps.any { it.id == id }
+        val next = old.layout.let { layout ->
+            layout.copy(
+                slots = if (enable && id in old.leadingSlots) layout.slots else pinHomeApp(layout.slots, id,
+                    enable, layout.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices(layout.grid) }.filterTo(mutableSetOf()) { it >= 0 }),
+                leadingSlots = if (enable) layout.leadingSlots else layout.leadingSlots.map { it?.takeUnless(id::equals) },
+            )
         }
+        mutable.value = old.withActiveLayout(next).copy(canUndoEdit = false)
         persist()
     }
 
@@ -315,29 +441,35 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
 
     fun setDock(slot: Int, id: String?) {
         if (statePayloadInvalid) return
+        // FR-49: setting or clearing a dock slot is a layout edit like any other.
+        if (mutable.value.layoutLocked) return
         if (slot !in mutable.value.dock.indices) return
         if (id != null && (isReservedFolderId(id) || mutable.value.folders.any { id in it.appIds })) return
-        mutable.update { old -> old.copy(canUndoEdit = false,
-            homeSlots = if (id == null) old.homeSlots else old.homeSlots.map { it?.takeUnless(id::equals) }.dropLastWhile { it == null },
+        val old = mutable.value
+        val next = old.layout.copy(
+            slots = if (id == null) old.homeSlots else old.homeSlots.map { it?.takeUnless(id::equals) }.dropLastWhile { it == null },
             leadingSlots = if (id == null) old.leadingSlots else old.leadingSlots.map { it?.takeUnless(id::equals) },
             dock = old.dock.mapIndexed { index, value ->
                 when { index == slot -> id; value == id && id != null -> null; else -> value }
-            }) }
+            })
+        mutable.value = old.withActiveLayout(next).copy(canUndoEdit = false)
         persist()
     }
 
     fun move(id: String, offset: Int) {
         val old = mutable.value
+        val grid = old.grid
         val from = old.layout.indexOfShortcut(id) ?: return
-        val page = homeCellPage(from)
+        val page = homeCellPage(from, grid)
         val target = if (page == -1) homeCellIndex(-1,
-            (homeCellLocal(from) + offset).coerceIn(0, HOME_CELLS - 1))
+            (homeCellLocal(from, grid) + offset).coerceIn(0, grid.cells - 1), grid)
         else (from + offset).coerceIn(0, old.homeSlots.lastIndex)
         applyDrop(id, DropTarget.Home(target))
     }
 
     fun applyDrop(id: String, target: DropTarget): Boolean {
         val old = mutable.value
+        if (old.layoutLocked) return false
         val folder = old.layout.folder(id)
         if (old.apps.none { it.id == id } && folder == null) return false
         if (target is DropTarget.Folder) return folder == null && addAppToFolder(target.id, id)
@@ -363,58 +495,102 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         commitLayout(com.jake.duolauncher.moveFolderApp(mutable.value.layout, folderId, appId, index))
     fun folder(id: String) = mutable.value.layout.folder(id)
 
+    /** FR-66. */
+    fun setFolderTint(folderId: String, tint: Int): Boolean = updateFolder(folderId) { it.copy(tint = tint) }
+
+    /** FR-66. */
+    fun setFolderSize(folderId: String, size: DuoFolderSize): Boolean = updateFolder(folderId) { it.copy(size = size) }
+
+    private fun updateFolder(folderId: String, transform: (FolderEntry) -> FolderEntry): Boolean {
+        val old = mutable.value
+        if (old.folders.none { it.id == folderId }) return false
+        return commitLayout(old.layout.copy(folders = old.folders.map { if (it.id == folderId) transform(it) else it }))
+    }
+
     fun applyImportedLayout(preview: LayoutImportPreview): Boolean {
         if (statePayloadInvalid) return false
         val old = mutable.value
         if (old.layout == preview.layout && old.compact == preview.compact && old.expanded == preview.expanded &&
             old.labels == preview.labels && old.googleSearch == preview.googleSearch && old.verticalStatus == preview.verticalStatus) return false
-        undoLayout = old.layout to preview.layout
         undoImportSettings = UndoImportSettings(old.compact, old.expanded, old.labels, old.googleSearch, old.verticalStatus)
-        mutable.value = old.copy(homeSlots = preview.layout.slots, leadingSlots = preview.layout.leadingSlots, dock = preview.layout.dock,
-            widgetPlacements = preview.layout.widgetPlacements, folders = preview.layout.folders,
-            widgetRestores = preview.layout.widgetRestores, compact = preview.compact, expanded = preview.expanded,
+        val next = old.withActiveLayout(preview.layout).copy(
+            compact = preview.compact, expanded = preview.expanded,
             labels = preview.labels, googleSearch = preview.googleSearch, verticalStatus = preview.verticalStatus,
             editRevision = old.editRevision + 1, canUndoEdit = true)
+        undoLayout = old to next
+        mutable.value = next
         persist()
         return true
     }
 
     fun moveWidget(from: Int, to: Int): Boolean {
-        val target = mutable.value.layout.placement(to) ?: return false
-        return moveWidgetTo(from, target.page * HOME_CELLS + target.row * GRID_COLUMNS + target.column)
+        val old = mutable.value
+        val target = old.layout.placement(to) ?: return false
+        return moveWidgetTo(from, target.page * old.grid.cells + target.row * old.grid.columns + target.column)
     }
     fun moveWidgetTo(slot: Int, index: Int) = commitLayout(moveWidget(mutable.value.layout, slot, index))
     fun resizeWidget(slot: Int, spanX: Int, spanY: Int) = commitLayout(resizeWidget(mutable.value.layout, slot, spanX, spanY))
     fun placeWidget(placement: WidgetPlacement) = commitLayout(placeWidget(mutable.value.layout, placement))
     fun placement(slot: Int) = mutable.value.layout.placement(slot)
-    fun nextWidgetSlot() = (mutable.value.widgetPlacements.maxOfOrNull { it.slot } ?: -1) + 1
-    fun removePlacement(source: DropTarget) = commitLayout(removePlacement(mutable.value.layout, source))
+
+    /**
+     * Widget slots key live `appWidgetId` bindings, so a new slot has to be unique across *every*
+     * stored layout, not just the one on screen. Reusing a slot from an off-screen layout would
+     * make two placements claim the same binding.
+     */
+    fun nextWidgetSlot(): Int {
+        val set = mutable.value.layoutSet
+        val highest = LayoutTarget.entries
+            .flatMap { set.layout(it).widgetPlacements }
+            .maxOfOrNull { it.slot } ?: -1
+        return highest + 1
+    }
+    /**
+     * FR-49 blocks *remove* as well as drag, and this is the model's last gate before a locked
+     * layout would lose a placement. The UI hides the − badge while locked, but the badge is not the
+     * only route here: the dock sheet's **Clear** and `WidgetController.remove` both land on this
+     * method, so the rule is enforced where the mutation actually happens.
+     */
+    fun removePlacement(source: DropTarget): Boolean {
+        if (mutable.value.layoutLocked) return false
+        return commitLayout(removePlacement(mutable.value.layout, source))
+    }
+
     private fun commitLayout(next: HomeLayout): Boolean {
         if (statePayloadInvalid) return false
         val old = mutable.value
         if (old.layout == next) return false
-        undoLayout = old.layout to next
+        val updated = old.withActiveLayout(next).copy(editRevision = old.editRevision + 1, canUndoEdit = true)
+        undoLayout = old to updated
         undoImportSettings = null
-        mutable.value = old.copy(homeSlots = next.slots, leadingSlots = next.leadingSlots, dock = next.dock,
-            widgetPlacements = next.widgetPlacements, folders = next.folders,
-            widgetRestores = next.widgetRestores,
-            editRevision = old.editRevision + 1, canUndoEdit = true)
+        mutable.value = updated
         persist()
         return true
     }
 
+    /**
+     * Undo restores the whole previous state, which is what makes a grid change undoable (FR-33):
+     * the grid, every layout and every displaced item come back together.
+     */
     fun undoEdit(): Boolean {
         val (before, after) = undoLayout ?: return false
         val old = mutable.value
-        if (!old.canUndoEdit || old.layout != after) return false
+        if (!old.canUndoEdit || old.layout != after.layout || old.layoutSet != after.layoutSet) return false
         val installed = (old.apps.map { it.id } + before.folders.map { it.id }).toSet()
         val settings = undoImportSettings
-        mutable.value = old.copy(homeSlots = reconcileHomeSlots(before.slots, installed),
-            leadingSlots = before.leadingSlots.map { it?.takeIf(installed::contains) },
-            dock = before.dock.map { it?.takeIf(installed::contains) }, widgetPlacements = before.widgetPlacements, folders = before.folders,
-            widgetRestores = before.widgetRestores, compact = settings?.compact ?: old.compact,
-            expanded = settings?.expanded ?: old.expanded, labels = settings?.labels ?: old.labels,
-            googleSearch = settings?.googleSearch ?: old.googleSearch, verticalStatus = settings?.verticalStatus ?: old.verticalStatus,
+        val restored = before.layout.let { layout ->
+            layout.copy(
+                slots = reconcileHomeSlots(layout.slots, installed),
+                leadingSlots = layout.leadingSlots.map { it?.takeIf(installed::contains) },
+                dock = layout.dock.map { it?.takeIf(installed::contains) },
+            )
+        }
+        mutable.value = before.withActiveLayout(restored).copy(
+            apps = old.apps, profiles = old.profiles, loading = old.loading, error = old.error,
+            compact = settings?.compact ?: before.compact,
+            expanded = settings?.expanded ?: before.expanded, labels = settings?.labels ?: before.labels,
+            googleSearch = settings?.googleSearch ?: before.googleSearch,
+            verticalStatus = settings?.verticalStatus ?: before.verticalStatus,
             canUndoEdit = false,
             editRevision = old.editRevision + 1)
         undoLayout = null
@@ -422,18 +598,326 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         persist()
         return true
     }
-    fun setLabels(value: Boolean) { if (statePayloadInvalid) return; undoLayout = null; undoImportSettings = null; mutable.update { it.copy(labels = value, canUndoEdit = false) }; persist() }
-    fun setVerticalStatus(value: Boolean) { if (statePayloadInvalid) return; undoLayout = null; undoImportSettings = null; mutable.update { it.copy(verticalStatus = value, canUndoEdit = false) }; persist() }
-    fun setGoogleSearch(value: Boolean) { if (statePayloadInvalid) return; undoLayout = null; undoImportSettings = null; mutable.update { it.copy(googleSearch = value, canUndoEdit = false) }; persist() }
-    fun setPreset(expanded: Boolean, value: LayoutPreset) {
+
+    fun setLabels(value: Boolean) = updateSimple { it.copy(labels = value) }
+    fun setVerticalStatus(value: Boolean) = updateSimple { it.copy(verticalStatus = value) }
+    fun setGoogleSearch(value: Boolean) = updateSimple { it.copy(googleSearch = value) }
+    fun setPreset(expanded: Boolean, value: LayoutPreset) = updateSimple {
+        if (expanded) it.copy(expanded = value.sanitized()) else it.copy(compact = value.sanitized())
+    }
+
+    private inline fun updateSimple(transform: (LauncherState) -> LauncherState) {
         if (statePayloadInvalid) return
         undoLayout = null; undoImportSettings = null
-        mutable.update { if (expanded) it.copy(expanded = value.sanitized(), canUndoEdit = false) else it.copy(compact = value.sanitized(), canUndoEdit = false) }
+        mutable.update { transform(it).copy(canUndoEdit = false) }
         persist()
     }
-    val retainedWidgetIds get() = (mutable.value.widgetPlacements.map { it.id } +
-        (if (mutable.value.canUndoEdit) undoLayout?.first?.widgetPlacements.orEmpty().map { it.id } else emptyList())).filter { it >= 0 }.toSet()
+
+    // -----------------------------------------------------------------------------------------
+    // Schema-9 model API (build plan section 2.2)
+    // -----------------------------------------------------------------------------------------
+
+    /** Tells the model which display is active, which selects the layout in Separate mode. */
+    fun setExpandedActive(expanded: Boolean) {
+        if (mutable.value.expandedActive == expanded) return
+        mutable.update { it.copy(expandedActive = expanded).withLayoutSet(it.layoutSet) }
+    }
+
+    /** The page a pin request should target (FR-28). */
+    fun setCurrentPage(page: Int) { currentPage = page.coerceAtLeast(0) }
+
+    fun activeLayout(expanded: Boolean = mutable.value.expandedActive): DuoLayout =
+        mutable.value.layoutSet.let { it.layout(it.targetFor(expanded)) }
+
+    /**
+     * FR-31/33/34. Re-lays the target layout onto [grid], moving anything that no longer fits and
+     * deleting nothing. The whole change is one undoable edit.
+     */
+    fun setGrid(
+        target: LayoutTarget = mutable.value.activeTarget,
+        grid: GridSpec,
+        providerLimits: (Int) -> WidgetSpanLimits = { WidgetSpanLimits() },
+    ): ReflowOutcome? {
+        if (statePayloadInvalid) return null
+        val old = mutable.value
+        val current = old.layoutSet.layout(target)
+        val wanted = grid.sanitized()
+        if (current.grid == wanted) return ReflowOutcome(current)
+        val outcome = reflowLayout(current, wanted, providerLimits)
+        val next = old.withLayoutSet(old.layoutSet.withLayout(target, outcome.layout))
+            .copy(editRevision = old.editRevision + 1, canUndoEdit = true)
+        undoLayout = old to next
+        undoImportSettings = null
+        mutable.value = next
+        persist()
+        return outcome
+    }
+
+    /**
+     * FR-32. Both layouts are kept, so this is never destructive. Switching into Separate seeds an
+     * empty target from the mirrored arrangement — apps and folders only, because a live widget
+     * binding belongs to exactly one placement and must not be duplicated into two layouts.
+     */
+    fun setLayoutMode(mode: LayoutMode) {
+        if (statePayloadInvalid) return
+        val old = mutable.value
+        if (old.layoutSet.mode == mode) return
+        var set = old.layoutSet.copy(mode = mode)
+        if (mode == LayoutMode.SEPARATE) {
+            listOf(LayoutTarget.COVER, LayoutTarget.INNER).forEach { target ->
+                val existing = set.layout(target)
+                if (existing.isEmpty) {
+                    val seeded = reflowLayout(
+                        set.mirrored.copy(widgetPlacements = emptyList(), widgetRestores = emptyList()),
+                        existing.grid,
+                    ).layout
+                    set = set.withLayout(target, seeded.copy(grid = existing.grid).withPageIds())
+                }
+            }
+        }
+        commitState(old.withLayoutSet(set))
+    }
+
+    /** FR-37. */
+    fun setDockSide(side: DockSide) = commitSet { it.copy(dock = it.dock.copy(side = side)) }
+
+    /** FR-38. Shrinking keeps filled slots rather than truncating them away. */
+    fun setDockCapacity(capacity: Int) = commitSet {
+        it.copy(dock = it.dock.copy(capacity = capacity).sanitized())
+    }
+
+    /** FR-75. Hiding removes the app from Home, the dock and folders across every layout. */
+    fun hideApp(appId: String) {
+        if (statePayloadInvalid || appId.isBlank()) return
+        val old = mutable.value
+        if (appId in old.hiddenApps) return
+        var set = old.layoutSet
+        LayoutTarget.entries.forEach { target ->
+            val layout = set.layout(target)
+            set = set.withLayout(target, layout.copy(
+                slots = layout.slots.map { it?.takeUnless(appId::equals) }.dropLastWhile { it == null },
+                leadingSlots = layout.leadingSlots.map { it?.takeUnless(appId::equals) },
+            ))
+        }
+        set = set.copy(
+            dock = set.dock.copy(items = set.dock.items.map { it?.takeUnless(appId::equals) }),
+            folders = set.folders.map { it.copy(appIds = it.appIds.filterNot(appId::equals)) },
+        )
+        // A folder emptied to one child dissolves the same way a removal does.
+        set = set.copy(folders = set.folders.filter { it.appIds.size >= 2 })
+        commitState(old.withLayoutSet(set).copy(hiddenApps = old.hiddenApps + appId))
+    }
+
+    /** FR-75. Unhiding restores it to the App Library, not to Home. */
+    fun unhideApp(appId: String) {
+        val old = mutable.value
+        if (appId !in old.hiddenApps) return
+        commitState(old.copy(hiddenApps = old.hiddenApps - appId))
+    }
+
+    /** FR-55. Every option's contents are preserved, so this only changes which one is shown. */
+    fun setLeadingPage(kind: LeadingPageKind) = commitState(
+        mutable.value.let { it.copy(leadingPage = it.leadingPage.copy(kind = kind)) })
+
+    /** FR-57. */
+    fun addToToday(itemId: String, index: Int? = null) {
+        val old = mutable.value
+        if (itemId.isBlank() || itemId in old.leadingPage.today) return
+        val today = old.leadingPage.today.toMutableList()
+        today.add((index ?: today.size).coerceIn(0, today.size), itemId)
+        commitState(old.copy(leadingPage = old.leadingPage.copy(today = today)))
+    }
+
+    fun removeFromToday(itemId: String) {
+        val old = mutable.value
+        if (itemId !in old.leadingPage.today) return
+        commitState(old.copy(leadingPage = old.leadingPage.copy(today = old.leadingPage.today - itemId)))
+    }
+
+    fun moveTodayItem(itemId: String, index: Int) {
+        val old = mutable.value
+        val from = old.leadingPage.today.indexOf(itemId)
+        if (from < 0 || index !in old.leadingPage.today.indices || from == index) return
+        val today = old.leadingPage.today.toMutableList().apply { add(index, removeAt(from)) }
+        commitState(old.copy(leadingPage = old.leadingPage.copy(today = today)))
+    }
+
+    /** FR-61. */
+    fun createStack(firstSlot: Int, secondSlot: Int): String? {
+        val old = mutable.value
+        if (firstSlot == secondSlot) return null
+        if (old.stacks.any { firstSlot in it.placementSlots || secondSlot in it.placementSlots }) return null
+        if (old.layout.placement(firstSlot) == null || old.layout.placement(secondSlot) == null) return null
+        val id = "stack:" + java.util.UUID.randomUUID()
+        commitState(old.copy(stacks = old.stacks + WidgetStack(id, listOf(firstSlot, secondSlot))))
+        return id
+    }
+
+    fun addToStack(stackId: String, slot: Int): Boolean {
+        val old = mutable.value
+        val stack = old.stacks.firstOrNull { it.id == stackId } ?: return false
+        if (slot in stack.placementSlots || stack.placementSlots.size >= MAX_STACK_WIDGETS) return false
+        commitState(old.copy(stacks = old.stacks.map {
+            if (it.id == stackId) it.copy(placementSlots = it.placementSlots + slot) else it
+        }))
+        return true
+    }
+
+    /** FR-64: a stack left with one widget becomes a plain widget; an empty one disappears. */
+    fun removeFromStack(stackId: String, slot: Int): Boolean {
+        val old = mutable.value
+        val stack = old.stacks.firstOrNull { it.id == stackId } ?: return false
+        if (slot !in stack.placementSlots) return false
+        val remaining = stack.placementSlots - slot
+        val stacks = if (remaining.size <= 1) old.stacks.filterNot { it.id == stackId }
+            else old.stacks.map {
+                if (it.id == stackId) it.copy(placementSlots = remaining,
+                    activeIndex = it.activeIndex.coerceIn(0, remaining.lastIndex)) else it
+            }
+        commitState(old.copy(stacks = stacks))
+        return true
+    }
+
+    fun setStackActive(stackId: String, index: Int): Boolean {
+        val old = mutable.value
+        val stack = old.stacks.firstOrNull { it.id == stackId } ?: return false
+        if (index !in stack.placementSlots.indices || index == stack.activeIndex) return false
+        commitState(old.copy(stacks = old.stacks.map {
+            if (it.id == stackId) it.copy(activeIndex = index) else it
+        }))
+        return true
+    }
+
+    /** FR-63. */
+    fun setStackSmartRotate(stackId: String, enabled: Boolean) {
+        val old = mutable.value
+        if (old.stacks.none { it.id == stackId }) return
+        commitState(old.copy(stacks = old.stacks.map {
+            if (it.id == stackId) it.copy(smartRotate = enabled) else it
+        }))
+    }
+
+    /** FR-49. */
+    fun setLockLayout(locked: Boolean) = updateSettings { it.copy(lockLayout = locked) }
+
+    /** FR-50. */
+    fun setAutoAddApps(enabled: Boolean) = updateSettings { it.copy(autoAddApps = enabled) }
+
+    /** FR-51/52/53. */
+    fun setGesture(
+        swipeDown: SwipeDownAction = mutable.value.settings.swipeDown,
+        swipeUp: SwipeUpAction = mutable.value.settings.swipeUp,
+        doubleTapLock: Boolean = mutable.value.settings.doubleTapLock,
+    ) = updateSettings { it.copy(swipeDown = swipeDown, swipeUp = swipeUp, doubleTapLock = doubleTapLock) }
+
+    /** FR-5. */
+    fun setGlass(level: Int) = updateSettings { it.copy(glassLevel = level.coerceIn(0, 100)) }
+
+    /** FR-8. Null selects Automatic. */
+    fun setAccent(color: Int?) = updateSettings { it.copy(accent = color) }
+
+    /** FR-20. */
+    fun setBadgeStyle(style: DuoBadgeStyle) = updateSettings { it.copy(badgeStyle = style) }
+
+    fun setReduceTransparency(value: Boolean) = updateSettings { it.copy(reduceTransparency = value) }
+    fun setWallpaperSource(source: WallpaperSource) = updateSettings { it.copy(wallpaperSource = source) }
+    fun setDimInDark(value: Boolean) = updateSettings { it.copy(dimInDark = value) }
+    fun setFont(font: DuoFontChoice) = updateSettings { it.copy(font = font) }
+    fun setLargeIcons(value: Boolean) = updateSettings { it.copy(largeIcons = value) }
+    fun setIconAppearance(appearance: IconAppearance) = updateSettings { it.copy(iconAppearance = appearance) }
+    fun setIconShape(shape: IconShape) = updateSettings { it.copy(iconShape = shape) }
+    fun setIconPack(packPackage: String?) = updateSettings { it.copy(iconPack = packPackage) }
+    fun setIconTint(color: Int, intensity: Int) = updateSettings {
+        it.copy(iconTint = color, iconTintIntensity = intensity.coerceIn(0, 100))
+    }
+    fun setLibraryView(view: AppLibraryView) = updateSettings { it.copy(libraryView = view) }
+    fun setSearchContacts(value: Boolean) = updateSettings { it.copy(searchContacts = value) }
+    fun setSuggestions(value: Boolean) = updateSettings { it.copy(suggestions = value) }
+    fun setDuoStatus(value: Boolean) = updateSettings { it.copy(duoStatus = value) }
+    fun setHidePrivateContainer(value: Boolean) = updateSettings { it.copy(hidePrivateContainer = value) }
+
+    /** The icon style the icons track renders with, assembled from the stored settings. */
+    val iconStyle: IconStyle get() = mutable.value.settings.let {
+        IconStyle(it.iconAppearance, it.iconTint, it.iconTintIntensity, it.iconShape, it.iconPack)
+    }
+
+    fun setIconOverride(override: IconOverrideRecord) {
+        val old = mutable.value
+        val others = old.iconOverrides.filterNot { it.profileAppId == override.profileAppId }
+        val cleared = override.iconPack == null && override.drawableName == null && override.label == null
+        commitState(old.copy(iconOverrides = if (cleared) others else others + override))
+    }
+
+    private inline fun updateSettings(transform: (DuoSettings) -> DuoSettings) {
+        if (statePayloadInvalid) return
+        mutable.update { it.copy(settings = transform(it.settings)) }
+        persist()
+    }
+
+    private fun commitSet(transform: (LayoutSet) -> LayoutSet) {
+        if (statePayloadInvalid) return
+        val old = mutable.value
+        commitState(old.withLayoutSet(transform(old.layoutSet)))
+    }
+
+    /** A settings-shaped change: persisted, but not part of the layout undo stack. */
+    private fun commitState(next: LauncherState) {
+        if (statePayloadInvalid) return
+        val old = mutable.value
+        if (old == next) return
+        mutable.value = next.copy(editRevision = old.editRevision + 1)
+        persist()
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Pin requests (FR-28, FR-49)
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * Places an accepted pin request on the first free cell of the current page, or a new page.
+     *
+     * A pinned shortcut is stored by its `PinnedShortcutKey.storageId`, which is prefixed so it can
+     * never be mistaken for an app's `profileAppId`. Widget requests are reported as handled
+     * without a placement: the system-level pin has already happened, and creating the placement
+     * needs the `appWidgetId` that `WidgetController` owns, so the widget track reconciles it.
+     */
+    private fun placePinnedItem(item: PinnedItem): Boolean {
+        if (statePayloadInvalid) return false
+        // FR-49 is enforced here as well as in the sheet: this is the last gate before a locked
+        // layout would be modified.
+        if (mutable.value.settings.lockLayout) return false
+        val id = when (item.kind) {
+            PinItemKind.SHORTCUT -> item.shortcut?.storageId ?: return false
+            PinItemKind.APPWIDGET -> return true
+        }
+        val old = mutable.value
+        if (old.layout.indexOfShortcut(id) != null) return true
+        val placed = placeOnFirstFreeCell(old.layout, id, currentPage) ?: return false
+        return commitLayout(placed)
+    }
+
+    /** First free cell on [preferredPage], then any later page, then a newly appended one. */
+    private fun placeOnFirstFreeCell(layout: HomeLayout, id: String, preferredPage: Int): HomeLayout? {
+        val grid = layout.grid
+        val blocked = layout.widgetPlacements.flatMapTo(mutableSetOf()) { it.coveredIndices(grid) }
+        val start = preferredPage.coerceIn(0, maxOf(0, layout.pageCount - 1))
+        val pages = (start until layout.pageCount) + (0 until start) + listOf(layout.pageCount)
+        pages.forEach { page ->
+            (0 until grid.cells).forEach { local ->
+                val index = homeCellIndex(page, local, grid)
+                if (index !in blocked && layout.slotAt(index) == null) return layout.withSlot(index, id)
+            }
+        }
+        return null
+    }
+
+    val retainedWidgetIds get() = (mutable.value.layoutSet.let { set ->
+        LayoutTarget.entries.flatMap { set.layout(it).widgetPlacements }.map { it.id }
+    } + (if (mutable.value.canUndoEdit) undoLayout?.first?.layoutSet?.let { set ->
+        LayoutTarget.entries.flatMap { set.layout(it).widgetPlacements }.map { it.id }
+    }.orEmpty() else emptyList())).filter { it >= 0 }.toSet()
     val canPruneWidgetIds get() = !statePayloadInvalid
+
     fun setWidget(slot: Int, id: Int) {
         if (statePayloadInvalid) return
         val old = mutable.value
@@ -444,8 +928,7 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
                 widgetRestores = old.widgetRestores.filterNot { it.slot == slot })
             else -> placeWidget(old.layout, migrateSchema5Widgets(List(slot) { EMPTY_WIDGET } + id).single())
         }
-        mutable.update { it.copy(widgetPlacements = next.widgetPlacements, widgetRestores = next.widgetRestores,
-            canUndoEdit = false, editRevision = it.editRevision + 1) }
+        mutable.value = old.withActiveLayout(next).copy(canUndoEdit = false, editRevision = old.editRevision + 1)
         undoLayout = null
         undoImportSettings = null
         persist()
@@ -453,12 +936,13 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
 
     internal fun restoreLayout(layout: HomeLayout) {
         if (statePayloadInvalid) return
-        val installed = (mutable.value.apps.map { it.id } + layout.folders.map { it.id }).toSet()
-        mutable.update { it.copy(homeSlots = reconcileHomeSlots(layout.slots, installed),
+        val old = mutable.value
+        val installed = (old.apps.map { it.id } + layout.folders.map { it.id }).toSet()
+        val restored = layout.copy(
+            slots = reconcileHomeSlots(layout.slots, installed),
             leadingSlots = layout.slotsForPage(-1).map { id -> id?.takeIf { it in installed || isFolderId(it) } },
-            dock = layout.dock.map { id -> id?.takeIf { it in installed || isFolderId(it) } }, widgetPlacements = layout.widgetPlacements,
-            folders = layout.folders, widgetRestores = layout.widgetRestores,
-            canUndoEdit = false, editRevision = it.editRevision + 1) }
+            dock = layout.dock.map { id -> id?.takeIf { it in installed || isFolderId(it) } })
+        mutable.value = old.withActiveLayout(restored).copy(canUndoEdit = false, editRevision = old.editRevision + 1)
         undoLayout = null
         undoImportSettings = null
         persist()
@@ -476,29 +960,36 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
 
     private fun serializeState(): String {
         val s = mutable.value
-        fun preset(p: LayoutPreset) = JSONObject().put("iconSize", p.iconSize).put("rowGap", p.rowGap)
-            .put("dockWidth", p.dockWidth).put("dockPosition", p.dockPosition).put("dockAlignToGrid", p.dockAlignToGrid)
-        val widgets = JSONArray().also { array -> s.widgetPlacements.forEach { w -> array.put(JSONObject()
-            .put("slot", w.slot).put("id", w.id).put("page", w.page).put("column", w.column).put("row", w.row)
-            .put("spanX", w.spanX).put("spanY", w.spanY)) } }
-        val folders = JSONArray().also { array -> s.folders.forEach { folder -> array.put(JSONObject()
-            .put("id", folder.id).put("title", folder.title).put("apps", JSONArray(folder.appIds))) } }
-        val restores = JSONArray().also { array -> s.widgetRestores.forEach { restore -> array.put(JSONObject()
-            .put("slot", restore.slot).put("provider", restore.providerComponent).put("userSerial", restore.userSerial)
-            .put("title", restore.title).put("profileLabel", restore.profileLabel).put("work", restore.isWork)
-            .put("sourceScope", restore.sourceScope)) } }
-        val data = JSONObject().put("schema", 8).put("pinned", JSONArray(s.order)).put("homeSlots", JSONArray(s.homeSlots))
-            .put("leadingSlots", JSONArray(s.leadingSlots)).put("dock", JSONArray(s.dock))
-            .put("widgets", widgets).put("labels", s.labels)
-            .put("folders", folders)
-            .put("restores", restores)
-            .put("googleSearch", s.googleSearch)
-            .put("verticalStatus", s.verticalStatus)
-            .put("compact", preset(s.compact)).put("expanded", preset(s.expanded))
-        return data.toString()
+        return encodeLauncherState(
+            LauncherPersistedState(
+                layoutSet = s.layoutSet,
+                leadingPage = s.leadingPage,
+                stacks = s.stacks,
+                hiddenApps = s.hiddenApps,
+                iconOverrides = s.iconOverrides,
+                settings = s.settings,
+                labels = s.labels,
+                googleSearch = s.googleSearch,
+                verticalStatus = s.verticalStatus,
+                compact = s.compact,
+                expanded = s.expanded,
+            ),
+        )
     }
 
+    /**
+     * Writes the layout, taking every backup that is due first.
+     *
+     * The v8 backup is written with a synchronous `commit()` *before* anything else, and before the
+     * schema-9 payload can replace `state`. This runs on the persistence IO thread, and it happens
+     * exactly once per install, so the cost is irrelevant next to the guarantee: if the process
+     * dies at any point during the upgrade, the untouched v8 payload is already durable on disk
+     * (FR-35, AC-29).
+     */
     private fun writeState(json: String) {
+        if (legacyRaw != null && sourceSchema <= 8 && !prefs.contains(STATE_V8_BACKUP_KEY)) {
+            prefs.edit().putString(STATE_V8_BACKUP_KEY, legacyRaw).commit()
+        }
         val editor = prefs.edit()
         if (legacyRaw != null && sourceSchema == 2 && !prefs.contains("state_v2_backup"))
             editor.putString("state_v2_backup", legacyRaw)
@@ -512,141 +1003,102 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
             editor.putString("state_v6_backup", legacyRaw)
         if (legacyRaw != null && sourceSchema < 8 && !prefs.contains("state_v7_backup"))
             editor.putString("state_v7_backup", legacyRaw)
-        editor.putString("state", json).putBoolean("initialized", true).apply()
+        // The payload being replaced is known-good because it was serialized from valid state, so
+        // it is the layout recovery falls back to first.
+        lastGoodPayload?.takeIf { it != json }?.let { editor.putString(STATE_V9_PREVIOUS_KEY, it) }
+        editor.putString(STATE_KEY, json).putBoolean("initialized", true).apply()
+        lastGoodPayload = json
     }
 
-    private fun load(): LauncherState = runCatching {
-        val j = JSONObject(prefs.getString("state", "{}") ?: "{}")
-        fun preset(key: String, default: LayoutPreset): LayoutPreset {
-            val p = j.optJSONObject(key) ?: return default
-            val loaded = LayoutPreset(p.optDouble("iconSize", default.iconSize.toDouble()).toFloat(),
-                p.optDouble("rowGap", default.rowGap.toDouble()).toFloat(),
-                p.optDouble("dockWidth", default.dockWidth.toDouble()).toFloat(),
-                p.optDouble("dockPosition", default.dockPosition.toDouble()).toFloat(),
-                p.optBoolean("dockAlignToGrid", true)).sanitized()
-            return upgradePreset(loaded, j.optInt("schema", 1), key == "expanded")
+    /**
+     * Loads the saved layout, falling back through the backups rather than starting empty.
+     *
+     * Order is current payload, then the previous schema-9 payload, then the v8 backup (error
+     * table: "Schema 9 load fails validation"). Only when every one of them fails does the model
+     * refuse to write, which is what stops a transient read problem from destroying a good layout.
+     */
+    private fun load(): LauncherState {
+        val current = prefs.getString(STATE_KEY, null)
+        if (current == null) {
+            // A genuinely fresh install gets the AC-30 defaults.
+            return LauncherState(loading = true).withLayoutSet(newInstallLayoutSet())
         }
-        val order = j.optJSONArray(if (j.optInt("schema", 1) >= 2) "pinned" else "order") ?: JSONArray()
-        val cells = j.optJSONArray("homeSlots").takeIf { j.optInt("schema", 1) >= 4 } ?: order
-        val schema = j.optInt("schema", 1)
-        require(schema <= 8) { "Unsupported saved-state schema $schema" }
-        val rawSlots = List(cells.length()) { cells.optString(it).takeIf { id -> id.isNotBlank() && id != "null" } }
-        val legacySlots = normalizeHomeSlots(rawSlots)
-        val rawLeadingSlots = if (schema >= 8) {
-            val leading = j.optJSONArray("leadingSlots") ?: error("Schema 8 requires a leading slot array")
-            require(leading.length() == HOME_CELLS)
-            List(HOME_CELLS) { leading.optString(it).takeIf { id -> id.isNotBlank() && id != "null" } }
-        } else List(HOME_CELLS) { null }
-        val loadedDock = List(4) { j.optJSONArray("dock")?.optString(it)?.takeIf { it.isNotBlank() && it != "null" } }
-        val widgetArray = j.optJSONArray("widgets")
-        val placements = if (schema >= 6) {
-            require(widgetArray != null) { "Schema $schema requires a widget placement array" }
-            fun strictInt(objectValue: JSONObject, key: String): Int {
-                val number = objectValue.get(key) as? Number ?: error("$key must be an integer")
-                val value = number.toDouble()
-                require(value.isFinite() && value % 1.0 == 0.0 && value >= Int.MIN_VALUE && value <= Int.MAX_VALUE) {
-                    "$key must be a finite integer"
+        val candidates = listOf(
+            current to null,
+            prefs.getString(STATE_V9_PREVIOUS_KEY, null) to RECOVERED_BANNER,
+            prefs.getString(STATE_V8_BACKUP_KEY, null) to RECOVERED_BANNER,
+        )
+        candidates.forEachIndexed { index, (raw, banner) ->
+            if (raw == null) return@forEachIndexed
+            when (val result = decodeLauncherState(raw)) {
+                is LayoutDecodeResult.Loaded -> {
+                    if (index == 0) lastGoodPayload = raw
+                    return result.state.toLauncherState(banner)
                 }
-                return value.toInt()
-            }
-            List(widgetArray.length()) { index ->
-                val w = widgetArray.getJSONObject(index)
-                WidgetPlacement(strictInt(w, "slot"), strictInt(w, "id"), strictInt(w, "page"), strictInt(w, "column"), strictInt(w, "row"),
-                    strictInt(w, "spanX"), strictInt(w, "spanY"))
-            }.also { loaded ->
-                require(loaded.map { it.slot }.distinct().size == loaded.size) { "Widget placement slots must be unique" }
-                loaded.forEach { placement ->
-                    val baseGeometry = placement.slot >= 0 && placement.id != EMPTY_WIDGET && placement.page >= -1 &&
-                        placement.column >= 0 && placement.row >= 0 && placement.spanX in 1..GRID_COLUMNS &&
-                        placement.spanY in 1..GRID_ROWS && placement.column + placement.spanX <= GRID_COLUMNS
-                    val insideGrid = placement.row + placement.spanY <= GRID_ROWS
-                    val migratedOverflow = placement.page > 0 && placement.slot / 3 == placement.page && placement.slot % 3 == 2 &&
-                        placement.column == 0 && placement.row == GRID_ROWS && placement.spanX == GRID_COLUMNS && placement.spanY == 4
-                    require(baseGeometry && (insideGrid || migratedOverflow)) { "Invalid widget placement" }
+                is LayoutDecodeResult.TooNew -> {
+                    // A downgrade must never rewrite a payload it cannot understand.
+                    statePayloadInvalid = true
+                    return LauncherState(loading = false, error = NEWER_VERSION_BANNER)
                 }
+                is LayoutDecodeResult.Failed -> Unit
             }
-        } else {
-            val ids = if (schema < 5) List(3) { index ->
-                (widgetArray?.optInt(index, -1) ?: -1).let {
-                    if (it < 0) listOf(CLOCK_WIDGET, DATE_WIDGET, INFO_WIDGET)[index] else it
-                }
-            } else List(widgetArray?.length() ?: 0) { widgetArray!!.optInt(it, EMPTY_WIDGET) }
-            migrateSchema5Widgets(ids)
-        }.filterNot { placement -> schema < 8 && placement == WidgetPlacement(2, INFO_WIDGET, -1, 0, 0, 4, 6) }
-        val folders = if (schema >= 7) {
-            val array = j.optJSONArray("folders") ?: error("Schema 7 requires a folder array")
-            List(array.length()) { index ->
-                val item = array.getJSONObject(index)
-                val apps = item.getJSONArray("apps")
-                FolderEntry(item.getString("id"), item.getString("title"), List(apps.length()) { apps.getString(it) })
-            }.also { loaded ->
-                require(loaded.map(FolderEntry::id).distinct().size == loaded.size)
-                require(loaded.flatMap(FolderEntry::appIds).distinct().size == loaded.sumOf { it.appIds.size })
-                loaded.forEach { folder ->
-                    require(isFolderId(folder.id) && folder.title.isNotBlank() && folder.appIds.size >= 2)
-                    require(folder.appIds.none { it.isBlank() || isReservedFolderId(it) })
-                }
-                val children = loaded.flatMapTo(mutableSetOf(), FolderEntry::appIds)
-                val folderIds = loaded.mapTo(mutableSetOf(), FolderEntry::id)
-                val rawFolderRefs = (rawSlots + rawLeadingSlots).filterNotNull().filter(::isReservedFolderId)
-                require(rawFolderRefs.all(::isFolderId))
-                require(rawFolderRefs.size == folderIds.size && rawFolderRefs.toSet() == folderIds)
-                require((rawSlots + rawLeadingSlots).none { it in children } &&
-                    loadedDock.none { it in children || (it != null && isReservedFolderId(it)) })
-            }
-        } else emptyList()
-        if (schema >= 8) {
-            val leadingIds = rawLeadingSlots.filterNotNull()
-            require(leadingIds.distinct().size == leadingIds.size) {
-                "An unfolded-only shortcut appears more than once"
-            }
-            val leadingApps = leadingIds.filterNot(::isReservedFolderId)
-            val otherApps = rawSlots.filterNotNull().filterNot(::isReservedFolderId) +
-                loadedDock.filterNotNull() + folders.flatMap(FolderEntry::appIds)
-            require(leadingApps.none { it in otherApps }) {
-                "An unfolded-only app shortcut appears on another surface"
-            }
-            val occupiedLeadingCells = rawLeadingSlots.indices
-                .filterTo(mutableSetOf()) { rawLeadingSlots[it] != null }
-                .mapTo(mutableSetOf()) { homeCellIndex(-1, it) }
-            require(placements.filter { it.page == -1 }.none { placement ->
-                placement.coveredIndices().any { it in occupiedLeadingCells }
-            }) { "An unfolded-only shortcut overlaps a widget" }
         }
-        val restores = if (schema >= 7) {
-            val array = j.optJSONArray("restores") ?: JSONArray()
-            List(array.length()) { index ->
-                val item = array.getJSONObject(index)
-                WidgetRestore(item.getInt("slot"), item.getString("provider"), item.getLong("userSerial"),
-                    item.getString("title"), item.getString("profileLabel"), item.optBoolean("work", false),
-                    item.optString("sourceScope").takeIf { it.isNotBlank() && it != "null" })
-            }.also { loaded ->
-                require(loaded.map(WidgetRestore::slot).distinct().size == loaded.size)
-                loaded.forEach { restore ->
-                    require(restore.slot >= 0 && restore.userSerial >= 0 && restore.title.isNotBlank() &&
-                        restore.profileLabel.isNotBlank() && ComponentName.unflattenFromString(restore.providerComponent) != null)
-                }
-                require(placements.filter { it.id == NEEDS_BINDING_WIDGET }.map { it.slot }.toSet() == loaded.map { it.slot }.toSet())
-            }
-        } else emptyList()
-        LauncherState(homeSlots = if (schema in 2..5) migrateSchema5Apps(legacySlots) else legacySlots,
-            leadingSlots = rawLeadingSlots,
-            dock = loadedDock,
-            widgetPlacements = placements, folders = folders, widgetRestores = restores,
-            googleSearch = j.optBoolean("googleSearch", true),
-            labels = j.optBoolean("labels", true), compact = preset("compact", LayoutPreset()),
-            expanded = preset("expanded", LayoutPreset()), verticalStatus = j.optBoolean("verticalStatus", true))
-    }.getOrElse {
-        statePayloadInvalid = legacyRaw != null
-        LauncherState(loading = false, error = "Saved Home layout could not be read; it was left unchanged.")
+        statePayloadInvalid = true
+        return LauncherState(loading = false, error = "Saved Home layout could not be read; it was left unchanged.")
     }
 
     override fun onCleared() {
         // viewModelScope is already cancelled here, so this flush has to be synchronous.
         flushPersistence()
         launcherApps.unregisterCallback(callback)
+        // Only retract the seams this instance registered; another live model may own them now.
+        if (DuoPinRequests.layoutLock === pinLock) DuoPinRequests.layoutLock = null
+        if (DuoPinRequests.unlock === pinUnlock) DuoPinRequests.unlock = null
+        if (DuoPinRequests.placer === pinPlacer) DuoPinRequests.placer = null
     }
 }
+
+/** The banner shown after a layout is recovered from a backup (error table). */
+internal const val RECOVERED_BANNER = "Duo restored your last saved layout"
+
+/** FR-83's sibling for the live layout: a payload from a newer build is left untouched. */
+internal const val NEWER_VERSION_BANNER = "This layout was saved by a newer Duo version."
+
+/** Rebuilds the flat active-layout fields from [set] so the two can never disagree. */
+internal fun LauncherState.withLayoutSet(set: LayoutSet): LauncherState {
+    val target = set.targetFor(expandedActive)
+    val active = set.homeLayout(target)
+    return copy(
+        layoutSet = set,
+        grid = active.grid,
+        homeSlots = active.slots,
+        leadingSlots = active.leadingSlots,
+        dock = active.dock,
+        widgetPlacements = active.widgetPlacements,
+        folders = active.folders,
+        widgetRestores = active.widgetRestores,
+    )
+}
+
+/** Writes an edited [HomeLayout] back into whichever layout is active. */
+internal fun LauncherState.withActiveLayout(layout: HomeLayout): LauncherState =
+    withLayoutSet(layoutSet.withHomeLayout(activeTarget, layout))
+
+internal fun LauncherPersistedState.toLauncherState(banner: String?): LauncherState =
+    LauncherState(
+        loading = true,
+        error = banner,
+        leadingPage = leadingPage,
+        stacks = stacks,
+        hiddenApps = hiddenApps,
+        iconOverrides = iconOverrides,
+        settings = settings,
+        labels = labels,
+        googleSearch = googleSearch,
+        verticalStatus = verticalStatus,
+        compact = compact,
+        expanded = expanded,
+    ).withLayoutSet(layoutSet)
 
 /**
  * The catalog thumbnail carried by [AppEntry], rendered through the icon pipeline so adaptive

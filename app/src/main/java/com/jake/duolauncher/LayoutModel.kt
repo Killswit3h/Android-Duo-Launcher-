@@ -88,7 +88,8 @@ fun migrateHomePins(legacy: List<String>, installed: List<String>, suggested: Li
     return if (wasReordered) surviving.take(16) else reconcilePins(suggested, installed).take(16)
 }
 
-fun homePageCount(cellCount: Int) = maxOf(1, (cellCount + HOME_CELLS - 1) / HOME_CELLS)
+fun homePageCount(cellCount: Int, grid: GridSpec = DEFAULT_GRID) =
+    maxOf(1, (cellCount + grid.cells - 1) / grid.cells)
 
 fun moveApp(order: List<String>, id: String, offset: Int): List<String> {
     val from = order.indexOf(id)

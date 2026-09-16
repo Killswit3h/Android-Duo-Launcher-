@@ -227,7 +227,7 @@ class DiscoverFeedActivity : DiscoverPageActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DiscoverSession.feed = WeakReference(this)
-        val vertical = runCatching { JSONObject(getSharedPreferences("launcher", 0).getString("state", "{}") ?: "{}").optBoolean("verticalStatus", true) }.getOrDefault(true)
+        val vertical = LauncherStateSnapshot.verticalStatus(this)
         configureDiscoverWindow(vertical)
         frame = DiscoverFrame(this, vertical)
         val bounds = windowManager.maximumWindowMetrics.bounds

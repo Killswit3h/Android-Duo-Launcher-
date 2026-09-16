@@ -55,6 +55,16 @@ gaps: the components exist, are tested, and are simply not connected to anything
   order bug, a missing host, or an unwired setting. The instrumented suite and a real launch are
   the only checks that would have.
 
+- **Restore applies only part of a backup.** `applyImportedLayout` consumes the active layout plus a
+  handful of legacy fields, so a v3 import silently ignores the other two layouts, the imported grid,
+  dock side and capacity, leading page and Today items, stacks, hidden apps, icon overrides and the
+  entire settings block. The codec round-trips all of it (proven by test); the model does not apply
+  it. The fix is local — consume those fields inside the single state commit `applyImportedLayout`
+  already performs, and widen its undo snapshot — and must stay atomic, never partially applied.
+- **The Settings screen is unreachable.** `home/HomeSheets.kt` still routes the settings sheet to the
+  old customization sheet, so FR-80 is unmet from the UI even though the screen exists and is tested.
+  FR-80's launcher entry additionally needs an `activity-alias` plus MainActivity routing.
+
 **Conclusion for the build plan:** a dedicated integration pass is required before inspection —
 hosting Today View, App Library and Search; driving Home tiles through the icon renderer; wiring the
 schema-9 settings (glass level, icon appearance, badge style, gestures, dock side, grid) into every

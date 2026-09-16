@@ -96,3 +96,51 @@ surface; and wiring the private-space gate into library, search, suggestions and
 - **`HomeDragIntegrationTest.kt:203`** asserts a layout write is visible immediately after an edit. Layout writes are now debounced 150ms, so that read races. The fix belongs in the test fixture (flush or wait), not in production code.
 - **Instrumented gesture pass on the emulator.** The `LauncherScreen` split was verified only by JVM tests, which do not exercise Compose UI. One-page-per-swipe, native widget vertical scroll and scoped long-press pickup are covered exclusively by `app/src/androidTest` and must be run before this is called done.
 - **`rememberSaveable` keys shifted** when nine states moved into `HomeWorkspace`. Harmless across app upgrades (Android discards saved instance state on version change) but it is a real structural change worth confirming on device.
+
+## FR-45 Edit mode: root cause of "long-press below the grid does nothing" (2026-09-16, static)
+
+Traced by reading the source; **not** confirmed on a device, because this session had no Android
+toolchain (see `specs/04-inspection-report.md`, "Environment").
+
+`home/HomePager.kt` builds every Home page in `HomePagePane`. The background long-press verb is
+defined once:
+
+```kotlin
+val backgroundLongPress = { if (!drag.active) onEditMode?.invoke() ?: onEmptyWidget(backgroundTarget) }
+```
+
+and then attached to exactly one pointer-input region:
+
+```kotlin
+Box(Modifier.width(16.dp).fillMaxHeight().testTag("home-options-margin-$page")
+    .pointerInput(...) { detectTapGestures(onLongPress = { backgroundLongPress() }, onTap = { onBackgroundTap?.invoke() }) })
+```
+
+That region is a **16dp-wide strip down the left edge of the pane**. Everything to its right is the
+`Column` that holds `SharedHomeGrid`, and that `Column` is `fillMaxHeight().verticalScroll(...)`, so
+it covers the whole pane height including the empty area below the last grid row. A long-press on
+empty wallpaper below the grid therefore lands on the scrolling `Column`, which has no long-press
+handler, and nothing happens. Only a press inside the 16dp margin reaches Edit mode.
+
+A second, smaller hole: `HomePagePane`'s own `Box` is
+`.height((contentHeight - bottomSpace).coerceAtLeast(0.dp))`, while its parent in
+`ExpandedWorkspace` is `fillMaxHeight()`. The `bottomSpace` band (44dp default Home, 88dp otherwise)
+below the pane has no handler at all on either display.
+
+This matches the reported symptom exactly: the unfolded screen has the most empty space below the
+grid, so it is where the dead zone is most obvious.
+
+**Proposed fix, not applied.** Move the `detectTapGestures` off the 16dp margin and onto the pane's
+own `Box`, keeping the margin's `testTag` for the existing tests. Compose dispatches the Main pass
+child-first, and both `clickable` and `detectTapGestures` consume the down, so a press that lands on
+an app tile, an empty cell, a folder or a widget is consumed by that child and never reaches the
+pane. Only genuinely empty background falls through. The empty-cell long-press path
+(`onEmptyWidget`) and the scoped widget long-press pickup are children and keep priority.
+
+**Why it was not applied in this session.** It changes pointer-event arbitration on Home, which is
+the exact regression boundary `docs/architecture.md` and `CONTRIBUTING.md` protect
+(one-page-per-swipe, native widget vertical scroll, scoped long-press pickup). The reasoning above
+is about Compose pass ordering and consumption, which cannot be confirmed without composing the UI.
+Landing it unbuilt and untested would be the same mistake as the `design/DuoType.kt` init-order bug
+that 763 green unit tests missed. It needs `:app:testDebugUnitTest`, the instrumented gesture suite,
+and checklist section 8 rows 8.1 to 8.12 before it is trustworthy.

@@ -49,13 +49,11 @@ fun StatusRail(
     val format = if (android.text.format.DateFormat.is24HourFormat(LocalContext.current)) "HH:mm" else "h:mm"
     val timeFormatter = remember(format) { DateTimeFormatter.ofPattern(format) }
     val dateFormatter = remember { DateTimeFormatter.ofPattern("MMM d") }
-    val description = listOfNotNull(
-        if (locationInUse) "Location in use" else null,
-        now.format(DateTimeFormatter.ofPattern("EEEE, MMMM d, $format")),
-        status.battery?.let { "Battery $it percent${if (status.charging) ", charging" else ""}" } ?: "Battery unavailable",
-        if (status.wifiConnected) "Wi-Fi connected${status.wifiLevel?.let { ", signal $it of 4" } ?: ""}" else "Wi-Fi disconnected",
-        if (status.airplane) "Airplane mode" else status.cellularLevel?.let { "Cellular signal $it of 4" } ?: "Cellular signal unavailable",
-    ).joinToString(". ")
+    val description = deviceStatusDescription(
+        status = status,
+        dateTimeText = now.format(DateTimeFormatter.ofPattern("EEEE, MMMM d, $format")),
+        locationInUse = locationInUse,
+    )
     val fontScale = LocalDensity.current.fontScale
     val labelStyle = TextStyle(shadow = Shadow(Color.Black.copy(alpha = .3f), Offset(0f, 1f), 3f))
     val wifiVisual = wifiSignalVisual(status.wifiConnected, status.wifiLevel)
@@ -126,8 +124,33 @@ fun StatusRail(
     }
 }
 
-private fun signalAlpha(emphasis: SignalElementEmphasis): Float = when (emphasis) {
+/**
+ * How strongly one Wi-Fi element is drawn.
+ *
+ * Shared with the Duo status cluster (FR-41), which draws the same signals in a different shape:
+ * an unknown reading is [SignalElementEmphasis.NEUTRAL], never full, in both presentations.
+ */
+internal fun signalAlpha(emphasis: SignalElementEmphasis): Float = when (emphasis) {
     SignalElementEmphasis.DIM -> .3f
     SignalElementEmphasis.NEUTRAL -> .62f
     SignalElementEmphasis.LIT -> 1f
 }
+
+/**
+ * The spoken description of the device status, shared by the vertical rail and the Duo status
+ * cluster so both presentations announce exactly the same facts (NFR-A1).
+ *
+ * Pure — [dateTimeText] is already formatted by the caller — so it is unit tested. An unknown
+ * reading is reported as unavailable rather than being rounded up into a confident claim.
+ */
+internal fun deviceStatusDescription(
+    status: DeviceStatus,
+    dateTimeText: String,
+    locationInUse: Boolean = false,
+): String = listOfNotNull(
+    if (locationInUse) "Location in use" else null,
+    dateTimeText,
+    status.battery?.let { "Battery $it percent${if (status.charging) ", charging" else ""}" } ?: "Battery unavailable",
+    if (status.wifiConnected) "Wi-Fi connected${status.wifiLevel?.let { ", signal $it of 4" } ?: ""}" else "Wi-Fi disconnected",
+    if (status.airplane) "Airplane mode" else status.cellularLevel?.let { "Cellular signal $it of 4" } ?: "Cellular signal unavailable",
+).joinToString(". ")

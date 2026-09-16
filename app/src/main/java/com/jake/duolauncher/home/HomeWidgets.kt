@@ -65,8 +65,8 @@ import com.jake.duolauncher.CLOCK_WIDGET
 import com.jake.duolauncher.DATE_WIDGET
 import com.jake.duolauncher.DropTarget
 import com.jake.duolauncher.EMPTY_WIDGET
-import com.jake.duolauncher.GRID_COLUMNS
-import com.jake.duolauncher.GRID_ROWS
+import com.jake.duolauncher.DEFAULT_GRID
+import com.jake.duolauncher.GridSpec
 import com.jake.duolauncher.Glass
 import com.jake.duolauncher.HomeDragState
 import com.jake.duolauncher.INFO_WIDGET
@@ -76,6 +76,10 @@ import com.jake.duolauncher.WidgetContentSize
 import com.jake.duolauncher.WidgetController
 import com.jake.duolauncher.WidgetPlacement
 import com.jake.duolauncher.WidgetSpanConstraints
+import com.jake.duolauncher.design.DuoTokens
+import com.jake.duolauncher.design.GlassLevel
+import com.jake.duolauncher.design.GlassSurface
+import com.jake.duolauncher.design.currentDuoColors
 import com.jake.duolauncher.dropRegion
 
 @Composable
@@ -85,12 +89,13 @@ internal fun WidgetSlot(id: Int, slot: Int, controller: WidgetController, modifi
         val displayedContentSize = WidgetContentSize(maxWidth.value, maxHeight.value)
         if (id == NEEDS_BINDING_WIDGET) {
             val restore = controller.restoreDescriptor(slot)
-            Surface(Modifier.fillMaxSize().testTag("widget-restore-$slot"), color = Glass.copy(alpha = .88f),
-                shape = RoundedCornerShape(24.dp), border = androidx.compose.foundation.BorderStroke(2.dp, Color.White.copy(alpha = .7f))) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.Center,
+            val colors = currentDuoColors()
+            GlassSurface(level = GlassLevel.WIDGET, shape = DuoTokens.radius.widget,
+                modifier = Modifier.fillMaxSize().testTag("widget-restore-$slot")) {
+                Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(restore?.title ?: "Saved widget", color = Ink, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-                    Text(restore?.profileLabel ?: "Unavailable profile", color = Ink.copy(alpha = .72f),
+                    Text(restore?.title ?: "Saved widget", color = colors.label1, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                    Text(restore?.profileLabel ?: "Unavailable profile", color = colors.label2,
                         style = MaterialTheme.typography.bodySmall)
                     restoreMessage?.let { Text(it, color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center) }
@@ -138,15 +143,21 @@ internal fun MovableWidget(id: Int, slot: Int, controller: WidgetController, dra
             CLOCK_WIDGET -> ClockCard(onAdd)
             DATE_WIDGET -> DateCard(onAdd)
             INFO_WIDGET -> if (slot % 3 == 2) ExpandedCard(onAdd) else GlassCard(onClick = onAdd) {
-                Icon(Icons.Rounded.Widgets, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                Text("Your widgets", color = Color.White, fontSize = 15.sp, maxLines = 1)
-                Text("Tap to choose", color = Color.White.copy(alpha = .8f), fontSize = 12.sp)
+                val colors = currentDuoColors()
+                Icon(Icons.Rounded.Widgets, null, tint = colors.label1, modifier = Modifier.size(28.dp))
+                Text("Your widgets", style = DuoTokens.type.callout, color = colors.label1, maxLines = 1)
+                Text("Tap to choose", style = DuoTokens.type.caption1, color = colors.label2)
             }
-            else -> Surface(Modifier.fillMaxSize().clickable(onClick = onAdd), color = Glass.copy(alpha = .18f),
-                shape = RoundedCornerShape(24.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .25f))) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Rounded.Add, null, tint = Color.White)
-                    Text(if (id >= 0) "Widget unavailable" else "Add widget", color = Color.White, fontSize = 12.sp)
+            else -> {
+                val colors = currentDuoColors()
+                GlassSurface(level = GlassLevel.WIDGET, shape = DuoTokens.radius.widget,
+                    modifier = Modifier.fillMaxSize().clip(DuoTokens.radius.widget).clickable(onClick = onAdd)) {
+                    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Rounded.Add, null, tint = colors.label1)
+                        Text(if (id >= 0) "Widget unavailable" else "Add widget",
+                            style = DuoTokens.type.caption1, color = colors.label1)
+                    }
                 }
             }
         }
@@ -164,6 +175,8 @@ internal fun WidgetActions(
     onStartResize: (Int, Int) -> Unit,
     onMoveToPage: (Int) -> Boolean,
     homePages: Int,
+    /** FR-31: the span limits follow the layout's own grid, not a fixed 4x6. */
+    grid: GridSpec = DEFAULT_GRID,
     onReplace: () -> Unit,
     onRemove: () -> Unit,
     onClose: () -> Unit,
@@ -175,9 +188,9 @@ internal fun WidgetActions(
     var height by remember(placement.slot, placement.spanY) { mutableIntStateOf(placement.spanY) }
     val minWidth = constraints?.minimum?.width ?: 2
     val minHeight = constraints?.minimum?.height ?: 2
-    val maxWidth = minOf(GRID_COLUMNS - placement.column, constraints?.maximum?.width ?: GRID_COLUMNS)
-    val maxHeight = minOf(GRID_ROWS - placement.row, constraints?.maximum?.height ?: GRID_ROWS)
-    val feasible = placement.page >= -1 && placement.row in 0 until GRID_ROWS &&
+    val maxWidth = minOf(grid.columns - placement.column, constraints?.maximum?.width ?: grid.columns)
+    val maxHeight = minOf(grid.rows - placement.row, constraints?.maximum?.height ?: grid.rows)
+    val feasible = placement.page >= -1 && placement.row in 0 until grid.rows &&
         !(placement.id >= 0 && constraints == null) && minWidth <= maxWidth && minHeight <= maxHeight
     val valid = feasible && isValid(width, height)
     Column(Modifier.fillMaxWidth().heightIn(max = sheetMaxHeight).verticalScroll(rememberScrollState())

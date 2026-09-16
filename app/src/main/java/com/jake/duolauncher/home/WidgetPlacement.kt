@@ -149,8 +149,10 @@ internal fun BoxScope.WidgetPlacementLayer(
             value = withContext(Dispatchers.IO) { widgetCatalog(launcherActivity, providers, selectedProfile) }
         }
         val topPitch = (geometry.widgetHeight + 18f) / 2f
-        val pickerSizing = remember(geometry) { WidgetGridSizing(GRID_COLUMNS, GRID_ROWS,
-            geometry.gridWidth / GRID_COLUMNS, minOf(topPitch, geometry.rowHeight),
+        // FR-31: the picker measures, addresses and places against the layout's own grid.
+        val grid = state.grid
+        val pickerSizing = remember(geometry, grid) { WidgetGridSizing(grid.columns, grid.rows,
+            geometry.gridWidth / grid.columns, minOf(topPitch, geometry.rowHeight),
             maxOf(topPitch, geometry.rowHeight), 10f, 18f,
             topRowHeightDp = topPitch, appRowHeightDp = geometry.rowHeight) }
         val footprint: (AppWidgetProviderInfo) -> WidgetSpan? = { provider ->
@@ -171,7 +173,7 @@ internal fun BoxScope.WidgetPlacementLayer(
                                 it.height in constraints.minimum.height..constraints.maximum.height
                         }
                     } ?: preferredSpan
-                    val special = existing?.takeIf { it.row + it.spanY > GRID_ROWS }
+                    val special = existing?.takeIf { it.row + it.spanY > grid.rows }
                     if (special != null) {
                         widgetSession = WidgetPickerSession(provider, widgetSlot,
                             WidgetSpan(special.spanX, special.spanY), Offset.Zero,
@@ -180,27 +182,27 @@ internal fun BoxScope.WidgetPlacementLayer(
                         scope.launch { pager.scrollToPage(special.page.coerceAtLeast(0).coerceAtMost(homePages - 1)) }
                         return@let
                     }
-                    val requestedIndex = existing?.let { homeCellIndex(it.page, it.row * GRID_COLUMNS + it.column) }
+                    val requestedIndex = existing?.let { homeCellIndex(it.page, it.row * grid.columns + it.column, grid) }
                         ?: widgetTargetIndex.takeUnless { it == Int.MIN_VALUE } ?: 0
-                    val requestedPage = homeCellPage(requestedIndex).coerceIn(if (expandedWorkspace) -1 else 0, homePages)
+                    val requestedPage = homeCellPage(requestedIndex, grid).coerceIn(if (expandedWorkspace) -1 else 0, homePages)
                     val availablePages = (if (expandedWorkspace) -1 else 0)..homePages
                     val autoPages = (listOf(requestedPage) + availablePages.filter { it != requestedPage })
                     val freeIndex = if (existing != null || widgetExactTarget) requestedIndex.takeIf {
                         widgetCandidate(state.layout, widgetSlot, it, span.width, span.height) != null
                     } else autoPages.asSequence().flatMap { page ->
-                        (0 until HOME_CELLS).asSequence().map { homeCellIndex(page, it) }
+                        (0 until grid.cells).asSequence().map { homeCellIndex(page, it, grid) }
                     }.firstOrNull { widgetCandidate(state.layout, widgetSlot, it, span.width, span.height) != null }
                     val targetIndex = freeIndex ?: requestedIndex
                     widgetSession = WidgetPickerSession(provider, widgetSlot, span, Offset.Zero,
                         dragging = false, targetIndex = targetIndex)
                     widgetPlacementMessage = if (freeIndex == null)
                         "There isn’t room for this size. Choose another page or move an item first." else null
-                    scope.launch { pager.scrollToPage(homeCellPage(targetIndex).coerceIn(0, homePages)) }
+                    scope.launch { pager.scrollToPage(homeCellPage(targetIndex, grid).coerceIn(0, homePages)) }
                 }
             },
             onBuiltin = builtin@{ builtinId ->
                 val existing = model.placement(widgetSlot)
-                val special = existing?.takeIf { it.row + it.spanY > GRID_ROWS }
+                val special = existing?.takeIf { it.row + it.spanY > grid.rows }
                 val span = existing?.let { WidgetSpan(it.spanX, it.spanY) } ?: WidgetSpan(2, 2)
                 if (special != null) {
                     widgetSession = WidgetPickerSession(null, widgetSlot, span, Offset.Zero,
@@ -210,13 +212,13 @@ internal fun BoxScope.WidgetPlacementLayer(
                     return@builtin
                 }
                 val requested = existing?.let {
-                    homeCellIndex(it.page, it.row * GRID_COLUMNS + it.column)
+                    homeCellIndex(it.page, it.row * grid.columns + it.column, grid)
                 } ?: widgetTargetIndex.takeUnless { it == Int.MIN_VALUE } ?: 0
-                val requestedPage = homeCellPage(requested).coerceIn(if (expandedWorkspace) -1 else 0, homePages)
+                val requestedPage = homeCellPage(requested, grid).coerceIn(if (expandedWorkspace) -1 else 0, homePages)
                 val availablePages = (if (expandedWorkspace) -1 else 0)..homePages
                 val candidates = if (model.placement(widgetSlot) != null || widgetExactTarget) sequenceOf(requested)
                     else (listOf(requestedPage) + availablePages.filter { it != requestedPage }).asSequence()
-                        .flatMap { page -> (0 until HOME_CELLS).asSequence().map { homeCellIndex(page, it) } }
+                        .flatMap { page -> (0 until grid.cells).asSequence().map { homeCellIndex(page, it, grid) } }
                 val free = candidates.firstOrNull {
                     widgetCandidate(state.layout, widgetSlot, it, span.width, span.height) != null
                 }
@@ -224,7 +226,7 @@ internal fun BoxScope.WidgetPlacementLayer(
                     dragging = false, targetIndex = free ?: requested, builtinId = builtinId)
                 widgetPlacementMessage = if (free == null)
                     "There isn’t room for this card. Choose another page or move an item first." else null
-                scope.launch { pager.scrollToPage(homeCellPage(free ?: requested).coerceIn(0, homePages)) }
+                scope.launch { pager.scrollToPage(homeCellPage(free ?: requested, grid).coerceIn(0, homePages)) }
             },
             onDragStart = { provider, point ->
                 footprint(provider)?.let { span ->
@@ -258,7 +260,7 @@ internal fun BoxScope.WidgetPlacementLayer(
             // bounds and may begin below the canonical six-row grid. They have
             // no Home-cell address; specialAnchor below is their visual anchor.
             val candidateIndex = widgetDraft?.takeIf { session.candidate == null }
-                ?.let { homeCellIndex(it.page, it.row * GRID_COLUMNS + it.column) }
+                ?.let { homeCellIndex(it.page, it.row * grid.columns + it.column, grid) }
             val visualIndex = candidateIndex ?: widgetRawTarget?.index ?: session.targetIndex
             val specialAnchor = session.candidate?.let { drag.regions[DropTarget.Widget(session.slot)]?.bounds }
             val anchor = specialAnchor ?: visualIndex?.let { drag.regions[DropTarget.Home(it)]?.bounds }
@@ -278,19 +280,19 @@ internal fun BoxScope.WidgetPlacementLayer(
                     TextButton(onClick = widgetPickerBack) { Text("Back to widgets") }
                     if (session.candidate != null) Text("Replace here", color = Ink,
                         modifier = Modifier.testTag("widget-replacement-locked"))
-                    val targetPage = homeCellPage(session.targetIndex ?: 0)
+                    val targetPage = homeCellPage(session.targetIndex ?: 0, grid)
                     if (!session.dragging && session.candidate == null) IconButton(
                         enabled = targetPage > if (expandedWorkspace) -1 else 0, onClick = {
-                        val local = homeCellLocal(session.targetIndex ?: 0)
+                        val local = homeCellLocal(session.targetIndex ?: 0, grid)
                         val page = targetPage - 1
-                        widgetSession = session.copy(targetIndex = homeCellIndex(page, local))
+                        widgetSession = session.copy(targetIndex = homeCellIndex(page, local, grid))
                         scope.launch { pager.animateScrollToPage(page.coerceAtLeast(0)) }
                     }) { Icon(Icons.Rounded.ChevronLeft, "Previous home page") }
                     Text("${session.span.width} × ${session.span.height}", color = Ink)
                     if (!session.dragging && session.candidate == null) IconButton(enabled = targetPage < homePages, onClick = {
-                        val local = homeCellLocal(session.targetIndex ?: 0)
+                        val local = homeCellLocal(session.targetIndex ?: 0, grid)
                         val page = (targetPage + 1).coerceAtMost(homePages)
-                        widgetSession = session.copy(targetIndex = homeCellIndex(page, local))
+                        widgetSession = session.copy(targetIndex = homeCellIndex(page, local, grid))
                         scope.launch { pager.animateScrollToPage(page.coerceAtLeast(0)) }
                     }) { Icon(Icons.Rounded.ChevronRight, "Next home page") }
                     if (!session.dragging) TextButton(enabled = widgetDraft != null, onClick = {
@@ -308,10 +310,10 @@ internal fun BoxScope.WidgetPlacementLayer(
                 }
                 if (anchor != null) {
                     val density = LocalDensity.current
-                    val cellWidthPx = with(density) { (geometry.gridWidth / GRID_COLUMNS).dp.toPx() }
+                    val cellWidthPx = with(density) { (geometry.gridWidth / grid.columns).dp.toPx() }
                     fun pickerRowTop(row: Int): Float = if (row <= 2) row * with(density) { topPitch.dp.toPx() }
                         else with(density) { (geometry.widgetHeight + 18f + (row - 2) * geometry.rowHeight).dp.toPx() }
-                    val candidateRow = homeCellLocal(visualIndex ?: 0) / GRID_COLUMNS
+                    val candidateRow = homeCellLocal(visualIndex ?: 0, grid) / grid.columns
                     val previewWidth = specialAnchor?.let { with(density) { it.width.toDp() } }
                         ?: with(density) { (cellWidthPx * session.span.width - 10.dp.toPx()).toDp() }
                     val previewHeight = specialAnchor?.let { with(density) { it.height.toDp() } }
@@ -393,11 +395,12 @@ resizeSlot?.let { slot ->
     val placement = model.placement(slot)
     val bounds = drag.regions[DropTarget.Widget(slot)]?.bounds
     if (placement != null && bounds != null) {
+        val grid = state.grid
         val minW = resizeConstraints?.minimum?.width ?: 2
         val minH = resizeConstraints?.minimum?.height ?: 2
-        val maxW = minOf(GRID_COLUMNS - placement.column, resizeConstraints?.maximum?.width ?: GRID_COLUMNS)
-        val maxH = minOf(GRID_ROWS - placement.row, resizeConstraints?.maximum?.height ?: GRID_ROWS)
-        val feasible = placement.page >= -1 && placement.row in 0 until GRID_ROWS &&
+        val maxW = minOf(grid.columns - placement.column, resizeConstraints?.maximum?.width ?: grid.columns)
+        val maxH = minOf(grid.rows - placement.row, resizeConstraints?.maximum?.height ?: grid.rows)
+        val feasible = placement.page >= -1 && placement.row in 0 until grid.rows &&
             !(placement.id >= 0 && resizeConstraints == null) && minW <= maxW && minH <= maxH
         val candidate = resizeWidget(state.layout, slot, resizeWidth, resizeHeight)
         val valid = feasible && ((resizeWidth == placement.spanX && resizeHeight == placement.spanY) || candidate != state.layout)

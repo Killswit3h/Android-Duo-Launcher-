@@ -291,18 +291,23 @@ class LauncherIntegrationTest {
         } finally { compose.runOnIdle { prior.forEach { model().setPinned(it, true) } } }
     }
 
-    @Test fun statusRailCanBeDisabledAndRestored() {
+    /**
+     * FR-41: with Duo status on — the default — the status presentation is the circular corner
+     * cluster rather than the vertical rail. The switch under test still governs whether any status
+     * is shown at all, which is what this has always checked.
+     */
+    @Test fun statusClusterCanBeDisabledAndRestored() {
         ready()
-        compose.onNodeWithTag("status-rail").assertIsDisplayed()
+        compose.onNodeWithTag("status-cluster").assertIsDisplayed()
         compose.openHomeCustomization()
         compose.onNodeWithTag("customization-gestures").performClick()
         compose.onNodeWithTag("status-switch").performScrollTo().performClick()
         compose.onNodeWithContentDescription("Close customization").performClick()
-        compose.onNodeWithTag("status-rail").assertDoesNotExist()
+        compose.onNodeWithTag("status-cluster").assertDoesNotExist()
         compose.activityRule.scenario.recreate()
         ready()
-        compose.onNodeWithTag("status-rail").assertDoesNotExist()
+        compose.onNodeWithTag("status-cluster").assertDoesNotExist()
         compose.runOnIdle { model().setVerticalStatus(true) }
-        compose.onNodeWithTag("status-rail").assertIsDisplayed()
+        compose.onNodeWithTag("status-cluster").assertIsDisplayed()
     }
 }

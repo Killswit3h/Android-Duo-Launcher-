@@ -7,7 +7,13 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 
-/** Opens customization through the same narrow background margin used on a packed Home page. */
+/**
+ * Opens customization through the same narrow background margin used on a packed Home page.
+ *
+ * Since FR-45 that long-press enters Edit mode rather than opening a sheet, so Customize is now the
+ * toolbar's own control. The route the tests care about — long-press empty Home space, then choose
+ * Customize — is unchanged.
+ */
 internal fun ComposeTestRule.openHomeCustomization(page: Int? = null) {
     val margin = page?.let { onNodeWithTag("home-options-margin-$it") }
         ?: (-1..20).firstNotNullOfOrNull { candidate ->
@@ -22,5 +28,5 @@ internal fun ComposeTestRule.openHomeCustomization(page: Int? = null) {
         up()
     }
     waitForIdle()
-    onNodeWithTag("empty-space-customize").performClick()
+    onNodeWithTag("edit-customize").performClick()
 }

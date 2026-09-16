@@ -39,6 +39,22 @@
             <meta-data android:name="android.accessibilityservice"
                 android:resource="@xml/system_shade_accessibility_service" />
         </service>
+        <!--
+            Notification badges (FR-20..FR-23). Opt-in and revocable from system Settings; the
+            launcher works fully without it. Exported only to the system, which is what
+            BIND_NOTIFICATION_LISTENER_SERVICE enforces (NFR-S6). The service reads the package,
+            user, channel badge flag, notification number and ongoing/summary flags, and persists
+            nothing (NFR-S3); android:allowBackup="false" above keeps badge state out of backups.
+        -->
+        <service android:name=".badges.DuoNotificationListener"
+            android:label="@string/badge_service_label"
+            android:description="@string/badge_service_description"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
         <activity android:name=".MainActivity" android:exported="true"
             android:launchMode="singleTask" android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize">

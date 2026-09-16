@@ -2,4 +2,6 @@
     <string name="dune_wallpaper_description">Duo dunes — the launcher’s landscape, sized for your display.</string>
     <string name="shade_service_label">Duo Launcher shade gestures</string>
     <string name="shade_service_description">Allows Duo Launcher’s Home screen gestures to open the system notifications and Quick Settings panels. It does not read screen content or observe activity in other apps.</string>
+    <string name="badge_service_label">Duo Launcher badges</string>
+    <string name="badge_service_description">Allows Duo Launcher to show notification badges on app icons. It reads only which app a notification came from and how many there are. It never reads notification titles or text, and nothing is saved.</string>
 </resources>

@@ -50,6 +50,41 @@ class UninstallRulesTest {
         assertFalse(UninstallRules.canUninstall(candidate))
     }
 
+    // ACTION_DELETE is implicit, so any app may register a filter for it. Without this rule the
+    // best-matching handler could be an ordinary third-party app showing a fake uninstall prompt,
+    // which is a credible place to ask for a password. Duo cannot tell the user the dialog is fake.
+
+    @Test fun aSystemHandlerIsTrusted() {
+        assertTrue(
+            UninstallAction.isTrustedHandler(
+                UninstallHandler("com.android.packageinstaller", isSystem = true),
+            ),
+        )
+    }
+
+    @Test fun anUpdatedSystemHandlerIsTrusted() {
+        // The platform package installer is commonly updated, and an updated system app still
+        // occupies a slot an ordinary app cannot take.
+        assertTrue(
+            UninstallAction.isTrustedHandler(
+                UninstallHandler("com.google.android.packageinstaller", isUpdatedSystem = true),
+            ),
+        )
+    }
+
+    @Test fun anOrdinaryAppIsNeverHandedTheUninstall() {
+        assertFalse(
+            UninstallAction.isTrustedHandler(UninstallHandler("com.evil.fakeinstaller")),
+        )
+    }
+
+    @Test fun anUnresolvableHandlerIsRefused() {
+        // Refusing costs an uninstall the user can still perform from App info or Settings.
+        assertFalse(UninstallAction.isTrustedHandler(null))
+        assertFalse(UninstallAction.isTrustedHandler(UninstallHandler("", isSystem = true)))
+        assertFalse(UninstallAction.isTrustedHandler(UninstallHandler("   ", isSystem = true)))
+    }
+
     @Test fun onlyAPlainPackageNameMayEnterAPackageUri() {
         assertTrue(UninstallAction.isUsablePackageName("com.example.game"))
         assertFalse(UninstallAction.isUsablePackageName(""))

@@ -76,6 +76,41 @@ object UninstallAction {
     fun isUsablePackageName(packageName: String): Boolean =
         packageName.isNotBlank() && ':' !in packageName && '/' !in packageName
 
+    /**
+     * Whether the activity that would receive the uninstall intent is one worth handing a user to.
+     *
+     * `ACTION_DELETE` is an implicit intent, and any app may register a filter for it. Without this
+     * check the best-matching handler could be an ordinary third-party app showing a convincing
+     * fake uninstall prompt, which is a credible place to ask for a password or a payment. Duo has
+     * no way to tell the user that the dialog they are looking at is not Android's.
+     *
+     * Requiring the handler to be part of the system image removes that. `FLAG_UPDATED_SYSTEM_APP`
+     * counts: the platform package installer is commonly updated, and an updated system app still
+     * occupies a slot an ordinary app cannot take.
+     *
+     * An unresolvable handler is **not** trusted. Refusing costs the user an uninstall they can
+     * still perform from **App info** or Settings, where starting an unknown activity costs them a
+     * dialog they cannot tell from the real one.
+     */
+    fun isTrustedHandler(handler: UninstallHandler?): Boolean =
+        handler != null &&
+            handler.packageName.isNotBlank() &&
+            (handler.isSystem || handler.isUpdatedSystem)
+
     /** Duo's own hint extra. Kept distinct from `Intent.EXTRA_USER`, which needs a `UserHandle`. */
     const val EXTRA_USER_SERIAL: String = "com.jake.duolauncher.extra.USER_SERIAL"
 }
+
+/**
+ * The activity that resolved for `ACTION_DELETE`, flattened off `ResolveInfo`.
+ *
+ * Gathered on the Android side so [UninstallAction.isTrustedHandler] stays pure and testable, the
+ * same split [UninstallCandidate] uses.
+ */
+data class UninstallHandler(
+    val packageName: String,
+    /** `ApplicationInfo.FLAG_SYSTEM`: shipped with the OS image. */
+    val isSystem: Boolean = false,
+    /** `ApplicationInfo.FLAG_UPDATED_SYSTEM_APP`: a system app that has since been updated. */
+    val isUpdatedSystem: Boolean = false,
+)

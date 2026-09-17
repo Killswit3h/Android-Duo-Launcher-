@@ -33,8 +33,37 @@ object LauncherStateSnapshot {
      */
     fun dockWidth(context: Context, widthDp: Float): Float = dockWidth(rawState(context), widthDp)
 
+    /**
+     * Whether **Lock Home layout** is on, read straight off disk (FR-49).
+     *
+     * This exists for one case: a pin request can start the process through `PinItemActivity`
+     * without [LauncherModel] ever being constructed, so the live lock seam in `DuoPinRequests` is
+     * null. An absent seam deliberately reads as *unlocked* — before the setting existed there was
+     * nothing to enforce — and that is exactly what let a pin through on a locked layout.
+     *
+     * The three outcomes are deliberately distinct, and mirror what `DuoPinRequests` already
+     * documents about a seam that cannot answer:
+     *
+     * - **Nothing saved** (a fresh install, or the `{}` default this reader is handed when the key
+     *   is absent) is unlocked. The user has not set the lock, so there is nothing to enforce.
+     * - **A payload older than schema 9** is unlocked. `lockLayout` arrived with schema 9, so an
+     *   un-migrated document genuinely has no such setting rather than a hidden one.
+     * - **A payload that exists but cannot be parsed** is *locked*. Something is saved and it
+     *   cannot be read, which is the "the setting exists and I could not read it" case. Failing
+     *   open there would be the FR-49 hole again, so it fails closed. The sheet then offers
+     *   **Unlock and add**, which cannot succeed without the model, so nothing is placed.
+     */
+    fun lockLayout(context: Context): Boolean = lockLayout(rawState(context))
+
     internal fun verticalStatus(raw: String?): Boolean =
         runCatching { parse(raw)?.boolean("verticalStatus", true) }.getOrNull() ?: true
+
+    internal fun lockLayout(raw: String?): Boolean {
+        if (raw.isNullOrBlank()) return false
+        val parsed = parse(raw) ?: return true
+        val settings = parsed.obj("settings") ?: return false
+        return runCatching { settings.boolean("lockLayout", false) }.getOrDefault(true)
+    }
 
     internal fun dockWidth(raw: String?, widthDp: Float): Float =
         runCatching {

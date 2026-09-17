@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
+import com.jake.duolauncher.today.builtin.DuoTicker
+import com.jake.duolauncher.today.builtin.TickSubscription
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -112,27 +114,42 @@ class DuneWallpaperService : WallpaperService() {
         private var photoLoading = false
         private var photoFailed = false
         private var visible = false
-        private var timeReceiverRegistered = false
-        private val timeReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (visible) { appearance.reloadFromPreferences(systemDark()); render(surfaceHolder) }
-            }
+        /**
+         * The four wall-clock actions come from the shared [DuoTicker] (one registration for the
+         * process, released when the last subscriber leaves) rather than from a third ad-hoc
+         * receiver of this engine's own.
+         *
+         * `ACTION_CONFIGURATION_CHANGED` stays a receiver here. It is not a time signal and is not
+         * part of the ticker's filter, but this engine repaints on it because a system dark-mode
+         * change arrives that way and the wallpaper has no `Configuration` callback of its own.
+         */
+        private var timeTick: TickSubscription? = null
+        private var configReceiverRegistered = false
+        private val configurationReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) = repaintForClockOrTheme()
+        }
+        private fun repaintForClockOrTheme() {
+            if (visible) { appearance.reloadFromPreferences(systemDark()); render(surfaceHolder) }
         }
         private fun registerTimeReceiver() {
-            if (timeReceiverRegistered) return
-            ContextCompat.registerReceiver(this@DuneWallpaperService, timeReceiver, IntentFilter().apply {
-                addAction(Intent.ACTION_TIME_TICK)
-                addAction(Intent.ACTION_TIME_CHANGED)
-                addAction(Intent.ACTION_TIMEZONE_CHANGED)
-                addAction(Intent.ACTION_DATE_CHANGED)
-                addAction(Intent.ACTION_CONFIGURATION_CHANGED)
-            }, ContextCompat.RECEIVER_NOT_EXPORTED)
-            timeReceiverRegistered = true
+            if (timeTick == null) {
+                timeTick = DuoTicker.of(this@DuneWallpaperService).subscribe { repaintForClockOrTheme() }
+            }
+            if (configReceiverRegistered) return
+            ContextCompat.registerReceiver(
+                this@DuneWallpaperService,
+                configurationReceiver,
+                IntentFilter(Intent.ACTION_CONFIGURATION_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            configReceiverRegistered = true
         }
         private fun unregisterTimeReceiver() {
-            if (!timeReceiverRegistered) return
-            unregisterReceiver(timeReceiver)
-            timeReceiverRegistered = false
+            timeTick?.cancel()
+            timeTick = null
+            if (!configReceiverRegistered) return
+            runCatching { unregisterReceiver(configurationReceiver) }
+            configReceiverRegistered = false
         }
         override fun onSurfaceCreated(holder: SurfaceHolder) { super.onSurfaceCreated(holder); appearance.reloadFromPreferences(systemDark()); render(holder) }
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {

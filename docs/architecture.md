@@ -17,6 +17,8 @@ All paths below are relative to `app/src/main/java/com/jake/duolauncher/`.
 | Customization | `CustomizationSheet.kt`, `LauncherActionSheet.kt` | Long-press actions, settings subpages and sheet navigation |
 | Photos, appearance and status | `LauncherBackground.kt`, `AppearanceSettings.kt`, `SolarSchedule.kt`, `DeviceStatus.kt`, `StatusRail.kt` | Private photo staging, theme scheduling, live status and its presentation |
 | Backup and shade access | `LayoutBackup.kt`, `BackupController.kt`, `SystemShadeController.kt` | Portable layout import/export and optional system-panel actions |
+| Stack and Today coherence | `WidgetStackCoherence.kt` | Keeping stacks and the Today column pointing at widgets that exist |
+| Wall-clock ticks | `today/builtin/SystemTimeTicker.kt` | The one `ACTION_TIME_TICK` registration every clock surface subscribes to |
 
 ## Layout and identity
 
@@ -25,6 +27,16 @@ All paths below are relative to `app/src/main/java/com/jake/duolauncher/`.
 Each ordinary Home page has a four-column, six-row grid. Apps occupy cells; widgets occupy explicit rectangles with durable slot identities. The dock has four positions and rejects incoming apps when full. Moving a shortcut between Home and the dock moves that placement; All apps remains the installed-app catalog.
 
 Unfolded navigation uses overlapping pairs: leading workspace + Home 1, Home 1 + Home 2, and so on. The leading workspace has separate `leadingSlots` and durable widget page `-1`; it disappears from the cover view without deleting its contents. **Pager page `-1` separately means Discover.** Use the address helpers in `HomeEditing.kt` rather than treating negative cell indices as missing values.
+
+Widget stacks and the Today View column both reference widget *placement slots*, which live inside
+the layouts rather than beside them. `WidgetStackCoherence.kt` keeps the two sides in step: it prunes
+a stack member whose placement has gone, collapses a stack left with one widget back into a plain
+widget, and drops a Today entry naming a slot or stack that no longer exists. A Today entry of any
+other shape is left alone, because that column also carries built-in widget ids whose grammar belongs
+to the Today track. The prune runs at every point a document is decoded or merged and at both commit
+points in `LauncherModel`, and only then does `validate()` assert the invariant. That order is the
+point: an incoherent layout is repaired rather than refused, because refusing one would present as
+"Saved Home layout could not be read" on an ordinary upgrade.
 
 Saved layouts use explicit JSON fields with migration backups. Layout export is a portable description, not a copy of Android's widget capabilities: an import must reconnect widgets, and cross-installation work profiles may require manual correction. Photo files are outside the layout backup.
 

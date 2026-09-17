@@ -148,16 +148,37 @@ object DuoPinRequests {
     var placer: PinnedItemPlacer? = null
 
     /**
+     * The cold-start fallback for [layoutLock], reading the persisted setting rather than the model.
+     *
+     * [PinItemActivity] is exported, so a pin request can start this process with no Home screen
+     * and no [LauncherModel] behind it. In that window [layoutLock] is null, and "an unregistered
+     * lock reads as unlocked" let a pin land on a layout the user had locked (FR-49). This seam
+     * closes that window by answering from `launcher/state` directly.
+     *
+     * It is only ever consulted when [layoutLock] is absent. The live model, when it exists, is
+     * always the better answer: it reflects an unlock the user performed seconds ago that has not
+     * been written out yet.
+     */
+    @Volatile
+    var persistedLock: HomeLayoutLock? = null
+
+    /**
      * Whether **Lock Home layout** is on.
      *
-     * An *unregistered* lock reads as unlocked: the setting does not exist yet, and there is nothing
-     * to enforce. A *registered* lock that throws reads as locked. A seam that cannot answer must
-     * not be the thing that lets an item be pinned past FR-49, and the two cases are different:
-     * absent means "no such setting", failing means "the setting exists and I could not read it".
+     * An *unregistered* lock with no persisted fallback reads as unlocked: the setting does not
+     * exist yet, and there is nothing to enforce. A *registered* lock that throws reads as locked.
+     * A seam that cannot answer must not be the thing that lets an item be pinned past FR-49, and
+     * the two cases are different: absent means "no such setting", failing means "the setting
+     * exists and I could not read it".
+     *
+     * [persistedLock] is consulted only when the live [layoutLock] is absent, and it is held to the
+     * same rule: if it throws, the layout reads as locked.
      */
     fun isLayoutLocked(): Boolean {
-        val lock = layoutLock ?: return false
-        return runCatching { lock.isLocked() }.getOrDefault(true)
+        val lock = layoutLock
+        if (lock != null) return runCatching { lock.isLocked() }.getOrDefault(true)
+        val persisted = persistedLock ?: return false
+        return runCatching { persisted.isLocked() }.getOrDefault(true)
     }
 
     /** True only when an unlock seam is registered and ran without throwing. */
@@ -173,6 +194,7 @@ object DuoPinRequests {
     /** For tests and for process teardown. */
     fun reset() {
         layoutLock = null
+        persistedLock = null
         unlock = null
         placer = null
     }

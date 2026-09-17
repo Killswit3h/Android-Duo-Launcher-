@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.jake.duolauncher.DuoAppearanceRuntime
 import com.jake.duolauncher.DuoTheme
+import com.jake.duolauncher.LauncherStateSnapshot
 import com.jake.duolauncher.design.DuoTokens
 import com.jake.duolauncher.design.GlassLevel
 import com.jake.duolauncher.design.GlassSurface
@@ -50,7 +51,7 @@ private const val MAX_PIN_LABEL_CHARS = 120
  * ## Security posture (NFR-S6)
  *
  * This activity is reachable by any app on the device, so it is written on the assumption that the
- * caller is hostile. Four rules make that safe, and they are all final even though the visual
+ * caller is hostile. Six rules make that safe, and they are all final even though the visual
  * design is not:
  *
  * 1. **The only source of a request is `LauncherApps.getPinItemRequest(intent)`.** The incoming
@@ -66,6 +67,12 @@ private const val MAX_PIN_LABEL_CHARS = 120
  * 4. **Validity is re-checked immediately before `accept()`**, and acceptance is single-shot. An
  *    arbitrary amount of time passes while the sheet is on screen, and a replayed intent, a double
  *    tap or a configuration change must not pin anything twice.
+ * 5. **Obscured touches are dropped.** The window sets `filterTouchesWhenObscured`, so an app
+ *    holding `SYSTEM_ALERT_WINDOW` cannot overlay this sheet and harvest a tap on **Add**.
+ * 6. **The FR-49 lock is read from disk when the model is absent.** A pin request can start this
+ *    process cold, with no Home screen behind it. Registering
+ *    [DuoPinRequests.persistedLock] before the gate runs means a locked layout stays locked in
+ *    exactly the window where the live seam does not exist yet.
  *
  * The decision itself lives in [PinRequestGate] so all of it is unit-tested rather than reasoned
  * about. Labels drawn here come from the request's own `ShortcutInfo`/`AppWidgetProviderInfo`, are
@@ -83,6 +90,20 @@ class PinItemActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handled = savedInstanceState?.getBoolean(STATE_HANDLED) == true
+
+        // NFR-S6: this window is exported, so an app holding SYSTEM_ALERT_WINDOW could float a
+        // convincing overlay above it and harvest a tap on Add. The decor view is the root of touch
+        // dispatch for the whole window, so filtering there drops obscured touches before anything
+        // in the Compose hierarchy sees them. Impact was capped at pinning an item the user did not
+        // intend, and nothing left the device, but the fix costs one line.
+        window?.decorView?.filterTouchesWhenObscured = true
+
+        // FR-49 cold start: a pin request can start this process without LauncherModel ever being
+        // constructed, so the live lock seam is null and "an absent lock reads as unlocked" would
+        // let a pin land on a layout the user locked. The persisted setting is the fallback, and
+        // DuoPinRequests consults it only while the live seam is missing.
+        val persisted = applicationContext
+        DuoPinRequests.persistedLock = HomeLayoutLock { LauncherStateSnapshot.lockLayout(persisted) }
 
         val genuine = runCatching {
             getSystemService(LauncherApps::class.java)?.getPinItemRequest(intent)

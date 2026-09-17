@@ -140,6 +140,56 @@ class HomeLayoutLockTest {
         assertTrue(DuoPinRequests.place(request))
     }
 
+    // ---------------------------------------------------------------------------------------
+    // FR-49 cold start. PinItemActivity is exported, so a pin request can start the process with
+    // no Home screen and no LauncherModel behind it. In that window the live seam does not exist,
+    // and "an unregistered lock reads as unlocked" let a pin land on a layout the user had locked.
+    // ---------------------------------------------------------------------------------------
+
+    @Test fun `the persisted lock closes the cold-start hole`() {
+        DuoPinRequests.reset()
+        assertFalse("no seam at all is still unlocked", DuoPinRequests.isLayoutLocked())
+
+        DuoPinRequests.persistedLock = HomeLayoutLock { true }
+        assertTrue(DuoPinRequests.isLayoutLocked())
+        assertEquals(
+            PinRequestDecision.Locked(PinItemKind.SHORTCUT),
+            PinRequestGate.evaluate(ACTION_CONFIRM_PIN_SHORTCUT, PinItemKind.SHORTCUT, true,
+                DuoPinRequests.isLayoutLocked()),
+        )
+        assertFalse(PinRequestGate.canAccept(requestValid = true, alreadyHandled = false,
+            layoutLocked = DuoPinRequests.isLayoutLocked()))
+    }
+
+    @Test fun `the live seam wins over the persisted one in both directions`() {
+        // The model is the better answer whenever it exists: it reflects an unlock the user
+        // performed seconds ago that has not been written out yet, and equally a lock that has not.
+        register()
+        setLocked(false)
+        DuoPinRequests.persistedLock = HomeLayoutLock { true }
+        assertFalse(DuoPinRequests.isLayoutLocked())
+
+        setLocked(true)
+        DuoPinRequests.persistedLock = HomeLayoutLock { false }
+        assertTrue(DuoPinRequests.isLayoutLocked())
+    }
+
+    @Test fun `a persisted lock that throws reads as locked`() {
+        // Same rule the live seam follows: failing to answer must not be what lets a pin through.
+        DuoPinRequests.reset()
+        DuoPinRequests.persistedLock = HomeLayoutLock { error("unreadable payload") }
+        assertTrue(DuoPinRequests.isLayoutLocked())
+    }
+
+    @Test fun `unlock and add cannot succeed on a cold start`() {
+        // Nothing can persist an unlock without the model, so the sheet stays locked rather than
+        // falling through to accept(). The placer is absent too, so nothing reaches Home.
+        DuoPinRequests.reset()
+        DuoPinRequests.persistedLock = HomeLayoutLock { true }
+        assertFalse(DuoPinRequests.unlockLayout())
+        assertTrue(DuoPinRequests.isLayoutLocked())
+    }
+
     @Test fun `the state exposes the lock to the UI that has to grey out edit mode`() {
         setLocked(true)
         assertTrue(state.layoutLocked)

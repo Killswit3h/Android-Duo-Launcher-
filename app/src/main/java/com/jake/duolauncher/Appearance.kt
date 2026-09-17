@@ -3,14 +3,12 @@ package com.jake.duolauncher
 import android.content.Context
 import androidx.compose.runtime.*
 import java.time.*
-import android.content.BroadcastReceiver
-import android.content.Intent
-import android.content.IntentFilter
-import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.jake.duolauncher.today.builtin.DuoTicker
+import com.jake.duolauncher.today.builtin.TickSubscription
 
 enum class AppearanceMode { LIGHT, DARK, SYSTEM, SUNRISE_SUNSET }
 data class AppearanceState(val mode: AppearanceMode = AppearanceMode.LIGHT, val place: String = "",
@@ -88,19 +86,15 @@ fun rememberSavedAppearance(): AppearanceState {
     val lifecycleOwner = LocalLifecycleOwner.current
     val store = remember(context) { AppearanceStore(context.applicationContext) }
     DisposableEffect(context, store, lifecycleOwner) {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(receiverContext: Context?, intent: Intent?) { store.reloadFromPreferences() }
-        }
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_TIME_TICK); addAction(Intent.ACTION_TIME_CHANGED)
-            addAction(Intent.ACTION_TIMEZONE_CHANGED); addAction(Intent.ACTION_DATE_CHANGED)
-        }
-        var registered = false
-        fun register() { if (!registered) {
-            ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-            registered = true; store.reloadFromPreferences()
+        // One of three ad-hoc TIME_TICK receivers this build started with, all registering the same
+        // four actions. They now share DuoTicker's single registration, which is released when the
+        // last subscriber leaves. The start/stop shape is unchanged: subscribed only while started.
+        var subscription: TickSubscription? = null
+        fun register() { if (subscription == null) {
+            subscription = DuoTicker.of(context).subscribe { store.reloadFromPreferences() }
+            store.reloadFromPreferences()
         } }
-        fun unregister() { if (registered) { runCatching { context.unregisterReceiver(receiver) }; registered = false } }
+        fun unregister() { subscription?.cancel(); subscription = null }
         val observer = LifecycleEventObserver { _, event -> when (event) {
             Lifecycle.Event.ON_START -> register()
             Lifecycle.Event.ON_STOP -> unregister()

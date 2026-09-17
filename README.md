@@ -66,8 +66,8 @@ Read [data and permissions](PRIVACY.md) before sharing backups or diagnostics.
 ## Known limits
 
 - Discover can differ across Google, Android, and vendor updates. Its smooth embedding transition includes a version-scoped compatibility workaround; it is not a portable SystemUI API. Recovery controls let you return Home when unavailable.
-- Work apps/widgets remain subject to administrator policy. Private Space is not supported.
-- Icon packs and notification dots are not implemented. Folders cannot nest or occupy dock slots.
+- Work apps/widgets remain subject to administrator policy. Private Space apps are hidden from Home, the App Library, Search and Suggestions while the space is locked.
+- Icon packs and notification dots are implemented and off by default; both are opt-in from Duo Settings, and notification dots need notification access you grant yourself. Folders cannot nest or occupy dock slots.
 - Imported Android widgets require binding again. Cross-installation work entries may require manual placement. Backups exclude photo backgrounds and system widget capabilities.
 - Secure lock-screen replacement and hinge-driven cross-display animation are outside this beta.
 

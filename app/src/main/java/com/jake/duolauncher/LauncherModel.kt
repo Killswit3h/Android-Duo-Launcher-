@@ -575,7 +575,8 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         if (statePayloadInvalid) return false
         val old = mutable.value
         if (old.layout == next) return false
-        val updated = old.withActiveLayout(next).copy(editRevision = old.editRevision + 1, canUndoEdit = true)
+        val updated = old.withActiveLayout(next).withCoherentStacks()
+            .copy(editRevision = old.editRevision + 1, canUndoEdit = true)
         undoLayout = old to updated
         mutable.value = updated
         persist()
@@ -810,7 +811,7 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         if (firstSlot == secondSlot) return null
         if (old.stacks.any { firstSlot in it.placementSlots || secondSlot in it.placementSlots }) return null
         if (old.layout.placement(firstSlot) == null || old.layout.placement(secondSlot) == null) return null
-        val id = "stack:" + java.util.UUID.randomUUID()
+        val id = STACK_ID_PREFIX + java.util.UUID.randomUUID()
         commitState(old.copy(stacks = old.stacks + WidgetStack(id, listOf(firstSlot, secondSlot))))
         return id
     }
@@ -819,6 +820,9 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
         val old = mutable.value
         val stack = old.stacks.firstOrNull { it.id == stackId } ?: return false
         if (slot in stack.placementSlots || stack.placementSlots.size >= MAX_STACK_WIDGETS) return false
+        // The same guard createStack applies. Without it this reported success for a slot that
+        // names no widget, and the commit's prune would then drop it again behind the caller's back.
+        if (old.layout.placement(slot) == null) return false
         commitState(old.copy(stacks = old.stacks.map {
             if (it.id == stackId) it.copy(placementSlots = it.placementSlots + slot) else it
         }))
@@ -926,9 +930,25 @@ class LauncherModel(application: Application) : AndroidViewModel(application) {
     private fun commitState(next: LauncherState) {
         if (statePayloadInvalid) return
         val old = mutable.value
-        if (old == next) return
-        mutable.value = next.copy(editRevision = old.editRevision + 1)
+        val coherent = next.withCoherentStacks()
+        if (old == coherent) return
+        mutable.value = coherent.copy(editRevision = old.editRevision + 1)
         persist()
+    }
+
+    /**
+     * Drops stacks and Today entries that no longer name a live widget placement (FR-57, FR-64).
+     *
+     * Removing a widget is the case that matters: `removePlacement` drops a placement, and before
+     * this nothing told the stack holding it. Applying the prune at the two commit points means the
+     * live state can no longer drift out of step with its own layouts, which is what lets
+     * [validate] assert the invariant instead of merely hoping for it.
+     */
+    private fun LauncherState.withCoherentStacks(): LauncherState {
+        val (prunedStacks, prunedToday) =
+            stackCoherence(stacks, leadingPage.today, layoutSet.liveWidgetSlots())
+        return if (prunedStacks == stacks && prunedToday == leadingPage.today) this
+        else copy(stacks = prunedStacks, leadingPage = leadingPage.copy(today = prunedToday))
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1194,12 +1214,24 @@ internal fun importedLauncherState(old: LauncherState, preview: LayoutImportPrev
     } else {
         old.withLayoutSet(legacyImportedLayoutSet(old, preview.layout))
     }
-    val imported = merged.copy(
+    val withPresets = merged.copy(
         compact = preview.compact,
         expanded = preview.expanded,
         labels = preview.labels,
         googleSearch = preview.googleSearch,
         verticalStatus = preview.verticalStatus,
+    )
+    // A v1/v2 document describes no stacks, so the user's current ones are kept — but the active
+    // layout's widget placements have just been replaced, and a kept stack can be left naming a
+    // slot that vanished or now holds a different widget. Pruning happens here, inside the single
+    // value the caller assigns, so the restore stays atomic: a stack is never half-pruned, and a
+    // refusal below leaves the live state untouched.
+    val (stacks, today) = stackCoherence(
+        withPresets.stacks, withPresets.leadingPage.today, withPresets.layoutSet.liveWidgetSlots(),
+    )
+    val imported = withPresets.copy(
+        stacks = stacks,
+        leadingPage = withPresets.leadingPage.copy(today = today),
     )
     // The same invariants the on-disk payload must satisfy. This runs before the caller's single
     // assignment, so a refusal leaves the live state exactly as it was.

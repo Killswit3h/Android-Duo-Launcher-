@@ -66,6 +66,46 @@ class LauncherStateSnapshotTest {
         assertEquals(72f, LauncherStateSnapshot.dockWidth(encoded, 933f), 0.001f)
     }
 
+    // ---------------------------------------------------------------------------------------
+    // FR-49: the persisted lock, read when PinItemActivity starts the process cold.
+    // ---------------------------------------------------------------------------------------
+
+    @Test fun `reads the layout lock from a schema 9 payload`() {
+        val locked = encodeLauncherState(
+            LauncherPersistedState(settings = DuoSettings(lockLayout = true)),
+        )
+        val unlocked = encodeLauncherState(
+            LauncherPersistedState(settings = DuoSettings(lockLayout = false)),
+        )
+        assertTrue(LauncherStateSnapshot.lockLayout(locked))
+        assertTrue(!LauncherStateSnapshot.lockLayout(unlocked))
+    }
+
+    @Test fun `nothing saved yet reads as unlocked`() {
+        // The user has not set the lock, so there is nothing to enforce. "{}" is what the reader is
+        // handed when the preferences key is absent, so it has to behave like null.
+        listOf(null, "", "   ", "{}").forEach {
+            assertTrue("\"$it\" must read as unlocked", !LauncherStateSnapshot.lockLayout(it))
+        }
+    }
+
+    @Test fun `a payload older than schema 9 reads as unlocked`() {
+        // lockLayout arrived with schema 9. A v8 document genuinely has no such setting rather
+        // than a hidden one, so reporting it locked would refuse pins nobody asked to refuse.
+        assertTrue(!LauncherStateSnapshot.lockLayout(v8))
+        assertTrue(!LauncherStateSnapshot.lockLayout("""{"schema":9}"""))
+        assertTrue(!LauncherStateSnapshot.lockLayout("""{"schema":9,"settings":{}}"""))
+    }
+
+    @Test fun `a saved payload that cannot be parsed reads as locked`() {
+        // The other half of the rule DuoPinRequests already documents: absent means "no such
+        // setting", unreadable means "the setting exists and I could not read it". Failing open
+        // here is the FR-49 hole this reader was added to close.
+        listOf("not json", "{", """{"schema":9,"settings":""").forEach {
+            assertTrue("\"$it\" must fail closed", LauncherStateSnapshot.lockLayout(it))
+        }
+    }
+
     @Test fun `an integer dock width is read as well as a decimal one`() {
         assertEquals(67f, LauncherStateSnapshot.dockWidth("""{"compact":{"dockWidth":67}}""", 475f), 0.001f)
         assertEquals(67.5f, LauncherStateSnapshot.dockWidth("""{"compact":{"dockWidth":67.5}}""", 475f), 0.001f)

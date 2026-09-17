@@ -4,11 +4,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.LauncherApps
+import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.Process
 import android.os.UserHandle
 import android.os.UserManager
@@ -216,8 +218,34 @@ object DuoUninstall {
             context.getSystemService(UserManager::class.java)?.getUserForSerialNumber(userSerial)
         }.getOrNull() ?: return false
         intent.putExtra(Intent.EXTRA_USER, user)
+        // ACTION_DELETE is implicit, so any app may register a filter for it and show a convincing
+        // fake uninstall prompt. Resolve who would actually receive this and refuse unless it is
+        // part of the system image. An unresolvable handler is refused too: App info and Settings
+        // remain routes to the same action, and neither hands the user a dialog Duo cannot vouch for.
+        if (!UninstallAction.isTrustedHandler(resolveHandler(context, intent))) return false
         return runCatching { context.startActivity(intent); true }.getOrDefault(false)
     }
+
+    /** The activity that would receive [intent], or null when nothing resolves or the lookup fails. */
+    private fun resolveHandler(context: Context, intent: Intent): UninstallHandler? = runCatching {
+        val packageManager = context.packageManager ?: return@runCatching null
+        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.resolveActivity(
+                intent,
+                PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+        }
+        val activity = resolved?.activityInfo ?: return@runCatching null
+        val flags = activity.applicationInfo?.flags ?: 0
+        UninstallHandler(
+            packageName = activity.packageName.orEmpty(),
+            isSystem = flags and ApplicationInfo.FLAG_SYSTEM != 0,
+            isUpdatedSystem = flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0,
+        )
+    }.getOrNull()
 
     private fun isSystem(context: Context, packageName: String, userSerial: Long): Boolean =
         runCatching {

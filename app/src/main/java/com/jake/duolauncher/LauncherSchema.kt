@@ -552,8 +552,9 @@ private fun decodeV9(root: DuoJson.Obj): LauncherPersistedState {
         compact = decodePreset(root.obj("compact")),
         expanded = decodePreset(root.obj("expanded")),
     )
-    validate(state)
-    return state
+    val coherent = state.withCoherentStacks()
+    validate(coherent)
+    return coherent
 }
 
 private fun decodeLayout(json: DuoJson.Obj?): DuoLayout {
@@ -722,11 +723,23 @@ internal fun validate(state: LauncherPersistedState) {
 
     val stackIds = state.stacks.mapTo(mutableSetOf(), WidgetStack::id)
     require(stackIds.size == state.stacks.size) { "Stack ids must be unique" }
+    // Every slot a stack or the Today column names must be a placement that exists. Callers reach
+    // this through withCoherentStacks(), which prunes first, so a failure here means a *new* way of
+    // producing an incoherent state rather than an old payload being punished for an old bug.
+    val liveSlots = set.liveWidgetSlots()
     state.stacks.forEach { stack ->
         require(stack.placementSlots.isNotEmpty()) { "A stack holds at least one widget" }
         require(stack.placementSlots.size <= MAX_STACK_WIDGETS) { "A stack holds at most $MAX_STACK_WIDGETS widgets" }
         require(stack.placementSlots.distinct().size == stack.placementSlots.size) { "A stack repeats a widget" }
         require(stack.activeIndex in stack.placementSlots.indices) { "Stack active index out of range" }
+        require(stack.placementSlots.all { it in liveSlots }) { "A stack names a widget that does not exist" }
+    }
+    state.leadingPage.today.forEach { entry ->
+        val slot = entry.toIntOrNull()
+        if (slot != null) require(slot in liveSlots) { "The Today column names a widget that does not exist" }
+        else if (entry.startsWith(STACK_ID_PREFIX)) {
+            require(entry in stackIds) { "The Today column names a stack that does not exist" }
+        }
     }
 }
 
@@ -1039,6 +1052,7 @@ internal fun migrateV8ToV9(legacy: LegacyLauncherState): LauncherPersistedState 
         compact = legacy.compact,
         expanded = legacy.expanded,
     )
-    validate(state)
-    return state
+    val coherent = state.withCoherentStacks()
+    validate(coherent)
+    return coherent
 }

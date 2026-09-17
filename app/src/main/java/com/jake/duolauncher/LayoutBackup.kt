@@ -93,8 +93,18 @@ data class LayoutImportPreview(
     val hiddenApps: Set<String> = emptySet(),
     val iconOverrides: List<IconOverrideRecord> = emptyList(),
     val settings: DuoSettings = DuoSettings(),
-    /** The version the file declared, so the review screen can say what it read. */
-    val version: Int = LAYOUT_BACKUP_VERSION,
+    /**
+     * The version the file declared, so the review screen can say what it read.
+     *
+     * Defaults to 1, not [LAYOUT_BACKUP_VERSION], and that matters. `importedLauncherState` keys
+     * "does this document carry the schema-9 block?" on this field, while [layoutSet] and
+     * [settings] default to *empty*. A default of 3 therefore made a hand-built preview claim to
+     * carry a schema-9 record it did not have, and applying it would have imported an empty
+     * launcher. Defaulting to 1 makes the whole declaration honest: every schema-9 field defaults
+     * to "not described", which is what a v1/v2 document means. Both real decoders pass this
+     * explicitly, so only hand-built previews are affected.
+     */
+    val version: Int = 1,
 )
 
 fun layoutBackupScope(context: Context): String {

@@ -26,14 +26,14 @@ Recorded so nobody re-researches them. Sources are in `specs/01-research-brief.m
 
 ## Raised during the build
 
-- **Consolidate the three existing TIME_TICK receivers** onto the shared ticker added for the Today View feeds (`MainActivity.kt:120`, `Appearance.kt:95` in `rememberSavedAppearance`, `DuneWallpaper.kt:124`). The new `SystemTimeTicker` is one registration that fans out and unregisters when its last subscriber leaves, so the three ad-hoc receivers can move onto it. Deferred because it touches three unrelated subsystems mid-build.
+- ~~**Consolidate the three existing TIME_TICK receivers**~~ **Done.** `MainActivity`, `rememberSavedAppearance` and `DuneWallpaper` all subscribe to `DuoTicker` now, and `SystemTimeTicker` is the only registration of `ACTION_TIME_TICK` left in main source. `DuneWallpaper` keeps a receiver for `ACTION_CONFIGURATION_CHANGED` alone: that is not a time signal, is not in the ticker's filter, and the wallpaper repaints on it because it has no `Configuration` callback of its own. That the clock still ticks is runtime behaviour no unit test covers, so it belongs on the device checklist.
 - **`PRIVACY.md` had no entry for the notification-listener badge access** introduced with badges; the paragraph added with the Today View feeds now covers both badges and media. Worth a deliberate re-read of the whole file during the S6 docs pass rather than trusting the incremental edits.
 
 ## Required before inspection (not deferred — tracked here so they are not forgotten)
 
 - **FR-77 is not enforced end to end.** The security review found `PrivateSpaceGate` has zero consumers in main source apart from badges. Until the gate is wired into the App Library, the search providers, `SuggestionExclusions.isPrivateSpaceLocked` and Home item filtering, a locked private space's apps remain visible in those surfaces. This is a blocking correctness item, not a polish item.
 - ~~**FR-49 is not enforced for pin requests.**~~ **Corrected.** The security review's "registered nowhere" finding was stale: `LauncherModel.init` already registered all three hooks and retracts them identity-checked in `onCleared`. Verified by `HomeLayoutLockTest`. Schema 9 additionally found and fixed a real gap the review missed — FR-49 gated drag, auto-add and pin but *not* remove, which mattered because the App Library sheet toggles a pin without going through Edit mode.
-- **FR-49 has a cold-start hole.** `PinItemActivity` can start the process without `LauncherModel` ever being constructed, so the lock hook is null and "absent lock reads as unlocked" lets a pin through on a locked layout. Fix is a persisted-settings fallback: a `lockLayout(context)` reader on `LauncherStateSnapshot` plus one line in `PinItemActivity`.
+- ~~**FR-49 has a cold-start hole.**~~ **Fixed.** `LauncherStateSnapshot.lockLayout` reads the setting off disk and `PinItemActivity` registers it as `DuoPinRequests.persistedLock` before the gate runs. Nothing saved reads as unlocked, a pre-schema-9 payload reads as unlocked, and a payload that exists but cannot be parsed reads as *locked*. The live seam wins whenever it exists. Covered by `LauncherStateSnapshotTest` and `HomeLayoutLockTest`; green in CI.
 - **Schema 9 validates more strictly than schema 8 did in one place:** it rejects a widget overlapping an occupied cell on ordinary pages, where v8 only checked the leading page. It fails safe (nothing is overwritten, the v8 payload stays on disk) but a user hitting it sees an empty Home with "Saved Home layout could not be read". Traced as unreachable through the legacy migration paths and the v8 editor, but this is the one case where the upgrade is stricter, so it needs an on-device upgrade test against a real 0.15.0-beta01 profile before release.
 - **Verify the private-space and lock wiring with tests that fail without it**, since both gaps were invisible to a green build and a passing suite.
 
@@ -72,16 +72,17 @@ surface; and wiring the private-space gate into library, search, suggestions and
 
 ## Restore: residual risks raised by the restore-wiring work
 
-- **Stacks can dangle after a legacy import.** A v1/v2 backup carries no stacks, so the user's
-  current ones are kept, but the active layout's widget placements are replaced — a stack can end up
-  referencing a slot that vanished or now holds a different widget. `validate()` checks neither
-  stack→placement nor `leadingPage.today`→slot coherence, so nothing catches it. Left deliberately
-  (a v2 backup must not rewrite what it never described); pruning dangling stacks on legacy import
-  is the real fix.
-- **`LayoutImportPreview`'s defaults are a trap.** `version` defaults to 3 while `layoutSet` and
-  `settings` default to empty, so a hand-built preview claims to carry schema-9 data it does not —
-  which would import an empty launcher. One construction site was fixed; the honest fix is a
-  `carriesSchema9` flag or defaulting `version` to 1.
+- ~~**Stacks can dangle after a legacy import.**~~ **Fixed**, and it was worse than recorded: the
+  same shape occurs with no restore at all, because `removePlacement` drops a placement and never
+  tells the stack holding it. `stackCoherence()` in `WidgetStackCoherence.kt` is the rule, applied
+  at both decoders, the backup decoder, `importedLauncherState` (inside the single value the caller
+  assigns, so the restore stays atomic) and both commit points in `LauncherModel`. `validate()` now
+  asserts stack→placement and today→slot coherence. Pruning first is what makes that safe: dangling
+  stacks already exist on disk, so a `validate` rule alone would have turned an upgrade into an
+  empty Home. Covered by `WidgetStackCoherenceTest`.
+- ~~**`LayoutImportPreview`'s defaults are a trap.**~~ **Fixed.** `version` now defaults to 1, so
+  every schema-9 field defaults to "not described", which is what a v1/v2 document means. Both real
+  decoders pass the version explicitly, so only hand-built previews change meaning.
 - **The SAF round trip is unverified.** Export → restore → undo through the real document picker,
   and AC-66 end to end, are instrumented-only and have not been run on a device yet.
 - **Two deliberate behaviour changes for the inspector to sign off:** a v1/v2 import onto a
@@ -90,9 +91,68 @@ surface; and wiring the private-space gate into library, search, suggestions and
 
 ## Security hardening deferred with a deliberate decision
 
-- **Tapjacking on the exported pin sheet.** `PinItemActivity` sets no `filterTouchesWhenObscured`, so an app holding `SYSTEM_ALERT_WINDOW` could overlay it and harvest a tap on **Add**. Impact is capped at pinning an item the user did not intend; nothing leaves the device. Deferred only because the pin sheet's UI was being restyled concurrently — worth doing once that settles.
-- **The uninstall hand-off is an implicit intent.** Any app can register an `ACTION_DELETE` filter and show a convincing fake uninstall prompt. Hardening means resolving the handler and requiring a system flag before starting it.
+- ~~**Tapjacking on the exported pin sheet.**~~ **Fixed.** The window sets `filterTouchesWhenObscured` on its decor view, which is the root of touch dispatch for the window, so obscured touches are dropped before anything in the Compose hierarchy sees them.
+- ~~**The uninstall hand-off is an implicit intent.**~~ **Fixed.** `DuoUninstall.start` resolves the handler and refuses unless it carries `FLAG_SYSTEM` or `FLAG_UPDATED_SYSTEM_APP`. An unresolvable handler is refused too, since **App info** and Settings remain routes to the same action. The decision lives in `UninstallAction.isTrustedHandler`, covered by `UninstallRulesTest`.
 
 - **`HomeDragIntegrationTest.kt:203`** asserts a layout write is visible immediately after an edit. Layout writes are now debounced 150ms, so that read races. The fix belongs in the test fixture (flush or wait), not in production code.
 - **Instrumented gesture pass on the emulator.** The `LauncherScreen` split was verified only by JVM tests, which do not exercise Compose UI. One-page-per-swipe, native widget vertical scroll and scoped long-press pickup are covered exclusively by `app/src/androidTest` and must be run before this is called done.
 - **`rememberSaveable` keys shifted** when nine states moved into `HomeWorkspace`. Harmless across app upgrades (Android discards saved instance state on version change) but it is a real structural change worth confirming on device.
+
+## FR-45 Edit mode: root cause of "long-press below the grid does nothing" (2026-09-16, static)
+
+Traced by reading the source; **not** confirmed on a device, because this session had no Android
+toolchain (see `specs/04-inspection-report.md`, "Environment").
+
+`home/HomePager.kt` builds every Home page in `HomePagePane`. The background long-press verb is
+defined once:
+
+```kotlin
+val backgroundLongPress = { if (!drag.active) onEditMode?.invoke() ?: onEmptyWidget(backgroundTarget) }
+```
+
+and then attached to exactly one pointer-input region:
+
+```kotlin
+Box(Modifier.width(16.dp).fillMaxHeight().testTag("home-options-margin-$page")
+    .pointerInput(...) { detectTapGestures(onLongPress = { backgroundLongPress() }, onTap = { onBackgroundTap?.invoke() }) })
+```
+
+That region is a **16dp-wide strip down the left edge of the pane**. Everything to its right is the
+`Column` that holds `SharedHomeGrid`, and that `Column` is `fillMaxHeight().verticalScroll(...)`, so
+it covers the whole pane height including the empty area below the last grid row. A long-press on
+empty wallpaper below the grid therefore lands on the scrolling `Column`, which has no long-press
+handler, and nothing happens. Only a press inside the 16dp margin reaches Edit mode.
+
+A second, smaller hole: `HomePagePane`'s own `Box` is
+`.height((contentHeight - bottomSpace).coerceAtLeast(0.dp))`, while its parent in
+`ExpandedWorkspace` is `fillMaxHeight()`. The `bottomSpace` band (44dp default Home, 88dp otherwise)
+below the pane has no handler at all on either display.
+
+This matches the reported symptom exactly: the unfolded screen has the most empty space below the
+grid, so it is where the dead zone is most obvious.
+
+**Proposed fix, not applied.** Move the `detectTapGestures` off the 16dp margin and onto the pane's
+own `Box`, keeping the margin's `testTag` for the existing tests. Compose dispatches the Main pass
+child-first, and both `clickable` and `detectTapGestures` consume the down, so a press that lands on
+an app tile, an empty cell, a folder or a widget is consumed by that child and never reaches the
+pane. Only genuinely empty background falls through. The empty-cell long-press path
+(`onEmptyWidget`) and the scoped widget long-press pickup are children and keep priority.
+
+**FR-53 is coupled to this, and that is not obvious from the spec.** Double-tap to lock has to
+recognise a double-tap on *the same empty Home background* that FR-45 long-presses. The natural
+implementation is one more callback on the `detectTapGestures` block that already carries `onTap`
+and `onLongPress`, which is a one-line change with no new hit region and no change to gesture
+arbitration. But that block is the 16dp margin strip, so a double-tap would be exactly as hard to
+land as the long-press is today, and the feature would ship technically present and practically
+unusable. Everything else FR-53 needs already exists: `DuoSettings.doubleTapLock`, the settings row,
+`LauncherModel.setGesture`, and an accessibility service that performs global actions. What is
+missing is `GLOBAL_ACTION_LOCK_SCREEN` on `SystemShadeAccessibilityService` and the callback. Do
+both with the fix above, in one change, and verify them together on a device.
+
+**Why it was not applied in this session.** It changes pointer-event arbitration on Home, which is
+the exact regression boundary `docs/architecture.md` and `CONTRIBUTING.md` protect
+(one-page-per-swipe, native widget vertical scroll, scoped long-press pickup). The reasoning above
+is about Compose pass ordering and consumption, which cannot be confirmed without composing the UI.
+Landing it unbuilt and untested would be the same mistake as the `design/DuoType.kt` init-order bug
+that 763 green unit tests missed. It needs `:app:testDebugUnitTest`, the instrumented gesture suite,
+and checklist section 8 rows 8.1 to 8.12 before it is trustworthy.

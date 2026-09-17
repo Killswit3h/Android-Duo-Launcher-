@@ -475,8 +475,11 @@ internal fun decodeLayoutBackupV3(
         expanded = preset("expanded"),
     )
     // The same invariants an on-disk schema-9 payload must satisfy. A backup that fails here
-    // describes a layout the launcher would refuse to save, so it is refused as a value.
-    validate(persisted)
+    // describes a layout the launcher would refuse to save, so it is refused as a value. Stacks are
+    // pruned first, for the same reason the decoder prunes: a backup written by an older build can
+    // carry a stack whose widget has since gone, and repairing that is better than refusing it.
+    val coherent = persisted.withCoherentStacks()
+    validate(coherent)
 
     val placedApps = LayoutTarget.entries.flatMap { target ->
         val layout = set.layout(target)
@@ -490,17 +493,19 @@ internal fun decodeLayoutBackupV3(
         appCount = placedApps.size + folders.sumOf { it.appIds.size },
         folderCount = folders.size,
         widgetCount = LayoutTarget.entries.sumOf { set.layout(it).widgetPlacements.size },
-        compact = persisted.compact,
-        expanded = persisted.expanded,
-        labels = persisted.labels,
-        googleSearch = persisted.googleSearch,
-        verticalStatus = persisted.verticalStatus,
+        compact = coherent.compact,
+        expanded = coherent.expanded,
+        labels = coherent.labels,
+        googleSearch = coherent.googleSearch,
+        verticalStatus = coherent.verticalStatus,
         layoutSet = set,
-        leadingPage = persisted.leadingPage,
-        stacks = persisted.stacks,
-        hiddenApps = persisted.hiddenApps,
-        iconOverrides = persisted.iconOverrides,
-        settings = persisted.settings,
+        // Built from the pruned document, not the raw one. Validating one value and previewing a
+        // different one would show the user stacks that the restore is about to drop.
+        leadingPage = coherent.leadingPage,
+        stacks = coherent.stacks,
+        hiddenApps = coherent.hiddenApps,
+        iconOverrides = coherent.iconOverrides,
+        settings = coherent.settings,
         version = LAYOUT_BACKUP_VERSION,
     )
 }
